@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  @apply bg-white text-ink-700 dark:bg-ink-900 dark:text-ink-100;
+}
+
+/* 正文里被朗读的当前句 */
+.sentence-active {
+  @apply bg-amber-100 dark:bg-amber-500/20 rounded-sm transition-colors duration-200;
+}
+
+/* 三种高亮颜色 */
+.hl-yellow {
+  @apply bg-yellow-200/80 dark:bg-yellow-500/30;
+}
+.hl-green {
+  @apply bg-green-200/80 dark:bg-green-500/30;
+}
+.hl-pink {
+  @apply bg-pink-200/80 dark:bg-pink-500/30;
+}
+
+.word-token:hover {
+  @apply bg-sky-100 dark:bg-sky-500/20 rounded-sm cursor-pointer;
+}
+
+/* 跳转定位后的闪烁提示 */
+@keyframes flash-target {
+  0% {
+    background-color: rgb(254 240 138);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.flash-target {
+  animation: flash-target 2s ease-out 1;
+}
+
+/* 笔记 Markdown 预览的基础排版 */
+.md-preview :is(h1, h2, h3) {
+  @apply font-semibold mt-3 mb-1;
+}
+.md-preview h1 {
+  @apply text-lg;
+}
+.md-preview h2 {
+  @apply text-base;
+}
+.md-preview p {
+  @apply my-1.5 leading-relaxed;
+}
+.md-preview ul {
+  @apply list-disc pl-5 my-1.5;
+}
+.md-preview ol {
+  @apply list-decimal pl-5 my-1.5;
+}
+.md-preview code {
+  @apply bg-ink-100 dark:bg-ink-800 px-1 rounded text-sm;
+}
+.md-preview blockquote {
+  @apply border-l-2 border-ink-200 dark:border-ink-700 pl-3 text-ink-700/70 dark:text-ink-100/70;
+}
