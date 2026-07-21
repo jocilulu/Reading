@@ -3,6 +3,8 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useStore, magazineName, makeVocabEntry } from '../../store/AppStore'
 import { splitSentences, uid, classNames, languageLabel } from '../../lib/utils'
 import { SentencePlayer } from '../../lib/tts'
+import { translateParagraphs, llmConfigured } from '../../lib/llm'
+import { fileCacheGet } from '../../lib/storage'
 import AudioPlayer from './AudioPlayer'
 import WordPopover from './WordPopover'
 import NotesSidebar from './NotesSidebar'
@@ -27,6 +29,11 @@ export default function ReaderPage() {
   const [selToolbar, setSelToolbar] = useState(null) // { x, y, segs, text }
   const [hlEditor, setHlEditor] = useState(null) // { hlId, x, y }
   const [notesOpen, setNotesOpen] = useState(false)
+  const [bilingual, setBilingual] = useState(false) // 双语对照视图
+  const [blurTrans, setBlurTrans] = useState(false) // 译文悬停显示(学习模式)
+  const [transState, setTransState] = useState(null) // null | {done,total} | 'error'
+  const [pdfOpen, setPdfOpen] = useState(false)
+  const [pdfUrl, setPdfUrl] = useState(null)
 
   // ---- 句子模型 ----
   const model = useMemo(() => {
@@ -119,10 +126,76 @@ export default function ReaderPage() {
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
+  // PDF 原版面板:打开时从 IndexedDB 取出原件生成 blob URL
+  useEffect(() => {
+    let url = null
+    if (pdfOpen && article) {
+      fileCacheGet('src-' + article.magazineId).then((blob) => {
+        if (blob) {
+          url = URL.createObjectURL(blob)
+          setPdfUrl(url)
+        } else {
+          setPdfUrl('missing')
+        }
+      })
+    } else {
+      setPdfUrl(null)
+    }
+    return () => {
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [pdfOpen, article?.magazineId])
+
   if (!article || !model) {
     return (
       <div className="py-24 text-center text-sm text-ink-700/40">文章不存在</div>
     )
+  }
+
+  // ---- 双语对照:按段落分块调用 LLM 翻译,结果持久化到文章记录 ----
+  const startTranslation = async () => {
+    if (!llmConfigured()) {
+      alert('请先在「设置」里配置 Anthropic API Key,才能生成翻译。')
+      return
+    }
+    const paras = article.paragraphs
+    const filled = [...(article.translation || new Array(paras.length).fill(null))]
+    setTransState({ done: filled.filter(Boolean).length, total: paras.length })
+    try {
+      // 每块累计不超过 ~5000 字符,顺序翻译,边译边存
+      let i = filled.findIndex((t) => !t)
+      if (i < 0) i = paras.length
+      while (i < paras.length) {
+        const chunk = []
+        let chars = 0
+        const start = i
+        while (i < paras.length && (chunk.length === 0 || chars < 5000)) {
+          chunk.push(paras[i])
+          chars += paras[i].length
+          i++
+        }
+        const out = await translateParagraphs(chunk)
+        out.forEach((t, k) => {
+          filled[start + k] = t
+        })
+        dispatch({
+          type: 'updateArticle',
+          id: article.id,
+          patch: { translation: [...filled] },
+        })
+        setTransState({ done: filled.filter(Boolean).length, total: paras.length })
+      }
+      setTransState(null)
+    } catch (e) {
+      console.error('翻译失败', e)
+      setTransState('error')
+    }
+  }
+
+  const toggleBilingual = () => {
+    const next = !bilingual
+    setBilingual(next)
+    if (next && !(article.translation || []).every(Boolean)) startTranslation()
   }
 
   const lang = article.language
@@ -264,9 +337,34 @@ export default function ReaderPage() {
 
   const editingHl = hlEditor ? state.highlights.find((h) => h.id === hlEditor.hlId) : null
   const noteText = state.articleNotes[article.id]?.text || ''
+  const magazine = state.magazines.find((m) => m.id === article.magazineId)
+  const translation = article.translation || []
 
   return (
     <div className="flex h-full">
+      {/* 左侧:PDF 原版面板(浏览器原生查看器,含图片,可缩放翻页) */}
+      {pdfOpen && (
+        <div className="hidden md:flex flex-col w-[42%] shrink-0 border-r border-ink-100 dark:border-ink-800">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-ink-100 dark:border-ink-800 text-xs text-ink-700/60 dark:text-ink-100/60">
+            <span>📄 {magazine?.sourceName || '原版 PDF'}</span>
+            <button onClick={() => setPdfOpen(false)} className="hover:text-ink-700 dark:hover:text-ink-100">
+              ✕ 关闭
+            </button>
+          </div>
+          {pdfUrl === 'missing' ? (
+            <div className="flex-1 flex items-center justify-center text-sm text-ink-700/40 dark:text-ink-100/40 px-6 text-center">
+              没有找到这份周刊的 PDF 原件(只有以 PDF 文件上传的周刊才会保留原版)
+            </div>
+          ) : pdfUrl ? (
+            <iframe title="原版 PDF" src={pdfUrl} className="flex-1 w-full" />
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-sm text-ink-700/40 animate-pulse">
+              加载中…
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         <AudioPlayer
           player={playerRef.current}
@@ -275,7 +373,12 @@ export default function ReaderPage() {
           sentenceCount={model.flat.length}
         />
         <div className="flex-1 overflow-y-auto" onMouseUp={handleMouseUp}>
-          <article className="max-w-article mx-auto px-4 py-10">
+          <article
+            className={classNames(
+              'mx-auto px-4 py-10',
+              bilingual ? 'max-w-5xl' : 'max-w-article'
+            )}
+          >
             <h1 className="text-3xl font-semibold leading-snug mb-2">{article.title}</h1>
             <div className="text-sm text-ink-700/50 dark:text-ink-100/50 mb-8 flex items-center gap-3">
               {article.author && <span>{article.author}</span>}
@@ -304,30 +407,101 @@ export default function ReaderPage() {
               </button>
             </div>
 
+            {/* 视图工具行:双语对照 / 原版 PDF */}
+            <div className="flex flex-wrap items-center gap-2 mb-6 text-xs">
+              {article.language !== 'zh' && (
+                <button
+                  onClick={toggleBilingual}
+                  className={classNames(
+                    'px-2.5 py-1 rounded-full border transition-colors',
+                    bilingual
+                      ? 'bg-ink-800 text-white border-ink-800 dark:bg-ink-100 dark:text-ink-900 dark:border-ink-100'
+                      : 'border-ink-200 dark:border-ink-700 text-ink-700/60 dark:text-ink-100/60 hover:border-ink-400'
+                  )}
+                >
+                  🀄 中英对照
+                </button>
+              )}
+              {bilingual && (
+                <label className="flex items-center gap-1.5 text-ink-700/60 dark:text-ink-100/60 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={blurTrans}
+                    onChange={(e) => setBlurTrans(e.target.checked)}
+                  />
+                  译文悬停显示(先自己读)
+                </label>
+              )}
+              {bilingual && transState && transState !== 'error' && (
+                <span className="text-ink-700/50 dark:text-ink-100/50 animate-pulse">
+                  翻译中 {transState.done}/{transState.total} 段…
+                </span>
+              )}
+              {bilingual && transState === 'error' && (
+                <button onClick={startTranslation} className="text-red-500 hover:underline">
+                  翻译失败,点击重试
+                </button>
+              )}
+              {magazine?.hasPdf && (
+                <button
+                  onClick={() => setPdfOpen((v) => !v)}
+                  className={classNames(
+                    'px-2.5 py-1 rounded-full border transition-colors hidden md:inline-block',
+                    pdfOpen
+                      ? 'bg-ink-800 text-white border-ink-800 dark:bg-ink-100 dark:text-ink-900 dark:border-ink-100'
+                      : 'border-ink-200 dark:border-ink-700 text-ink-700/60 dark:text-ink-100/60 hover:border-ink-400'
+                  )}
+                >
+                  📄 原版 PDF
+                </button>
+              )}
+            </div>
+
             <div ref={containerRef} className="space-y-5">
               {model.paras.map((para) => (
                 <div key={para.pi} className="relative">
-                  <p
+                  <div
                     className={classNames(
-                      'leading-[1.9] text-[17px]',
-                      isForeign ? 'font-serif' : ''
+                      bilingual && 'grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 items-start'
                     )}
                   >
-                    {para.sentences.map((s, si) => (
-                      <React.Fragment key={s.id}>
-                        {si > 0 && isForeign && ' '}
-                        <Sentence
-                          sentence={s}
-                          segs={segsBySentence.get(s.id) || []}
-                          active={s.id === activeSentenceId}
-                          isForeign={isForeign}
-                          onClick={(e) => handleSentenceClick(e, s)}
-                        />
-                      </React.Fragment>
-                    ))}
-                  </p>
-                  {/* Notion 风格批注气泡:大屏显示在段落右侧;速记侧栏打开时改为段落下方内联 */}
-                  {notesByPara.has(para.pi) && !notesOpen && (
+                    <p
+                      className={classNames(
+                        'leading-[1.9] text-[17px]',
+                        isForeign ? 'font-serif' : ''
+                      )}
+                    >
+                      {para.sentences.map((s, si) => (
+                        <React.Fragment key={s.id}>
+                          {si > 0 && isForeign && ' '}
+                          <Sentence
+                            sentence={s}
+                            segs={segsBySentence.get(s.id) || []}
+                            active={s.id === activeSentenceId}
+                            isForeign={isForeign}
+                            onClick={(e) => handleSentenceClick(e, s)}
+                          />
+                        </React.Fragment>
+                      ))}
+                    </p>
+                    {bilingual && (
+                      <p
+                        className={classNames(
+                          'leading-[1.9] text-[16px] text-ink-700/80 dark:text-ink-100/80',
+                          'md:border-l md:border-ink-100 md:dark:border-ink-800 md:pl-6',
+                          blurTrans && 'blur-[5px] hover:blur-none transition-all duration-200'
+                        )}
+                      >
+                        {translation[para.pi] || (
+                          <span className="text-ink-700/30 dark:text-ink-100/30 italic">
+                            {transState === 'error' ? '(待翻译)' : '翻译中…'}
+                          </span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                  {/* Notion 风格批注气泡:大屏显示在段落右侧;速记侧栏/对照模式下改为段落下方内联 */}
+                  {notesByPara.has(para.pi) && !notesOpen && !bilingual && (
                     <div className="hidden xl:flex flex-col gap-2 absolute top-0 left-full ml-6 w-52">
                       {notesByPara.get(para.pi).map((h) => (
                         <NoteBubble
@@ -339,7 +513,12 @@ export default function ReaderPage() {
                     </div>
                   )}
                   {notesByPara.has(para.pi) && (
-                    <div className={classNames('mt-1.5 space-y-1.5', !notesOpen && 'xl:hidden')}>
+                    <div
+                      className={classNames(
+                        'mt-1.5 space-y-1.5',
+                        !notesOpen && !bilingual && 'xl:hidden'
+                      )}
+                    >
                       {notesByPara.get(para.pi).map((h) => (
                         <NoteBubble
                           key={h.id}

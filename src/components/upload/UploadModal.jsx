@@ -9,6 +9,7 @@ import {
   finalizeArticle,
 } from '../../lib/parse'
 import { summarizeArticle, llmConfigured } from '../../lib/llm'
+import { fileCachePut } from '../../lib/storage'
 import { splitSentences, detectLanguage, uid, weekKeyOf, shiftWeekKey, weekLabel } from '../../lib/utils'
 
 export default function UploadModal({ defaultWeekKey, onClose }) {
@@ -95,13 +96,18 @@ export default function UploadModal({ defaultWeekKey, onClose }) {
   }
 
   const confirm = () => {
+    const isPdf = sourceType === 'file' && file && /\.pdf$/i.test(file.name)
     const magazine = {
       id: uid('m'),
       weekKey,
       name: name.trim() || '未命名周刊',
       sourceType,
+      hasPdf: Boolean(isPdf),
+      sourceName: file?.name || '',
       createdAt: Date.now(),
     }
+    // 保存 PDF 原件到本机 IndexedDB,阅读页可随时查看原版(含图片)
+    if (isPdf) fileCachePut('src-' + magazine.id, file)
     const articles = drafts
       .filter((d) => d.paragraphs.length)
       .map((d, i) =>

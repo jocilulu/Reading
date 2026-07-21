@@ -128,6 +128,37 @@ export async function summarizeArticle({ title, content }) {
   })
 }
 
+// ---- 段落翻译(双语对照) ----
+
+const TRANSLATE_SCHEMA = {
+  type: 'object',
+  properties: {
+    translations: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '与输入段落一一对应的中文译文,数量和顺序必须完全一致',
+    },
+  },
+  required: ['translations'],
+  additionalProperties: false,
+}
+
+export async function translateParagraphs(paragraphs) {
+  const numbered = paragraphs.map((p, i) => `[${i + 1}] ${p}`).join('\n\n')
+  const { translations } = await createJSON({
+    system:
+      '你是一位优秀的外刊译者。把用户给出的每个编号段落翻译成流畅、准确的简体中文,' +
+      '保留原文的语气和信息密度,不增删内容。输出的译文数组必须与输入段落数量、顺序完全一致,不包含编号。',
+    prompt: numbered,
+    schema: TRANSLATE_SCHEMA,
+    maxTokens: 16000,
+  })
+  if (!Array.isArray(translations) || translations.length !== paragraphs.length) {
+    throw new Error('译文段落数与原文不一致')
+  }
+  return translations
+}
+
 // ---- 语境释义 ----
 
 const WORD_SCHEMA = {
