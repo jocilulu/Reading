@@ -1,7 +1,7 @@
 // 上传内容解析:PDF / EPUB / 纯文本 / 网页链接 → 纯文本 → 文章拆分
 
 import { detectLanguage, splitSentences, countWords, estimateMinutes, uid } from './utils'
-import { splitArticlesLLM, llmConfigured } from './llm'
+import { findArticleBoundaries, llmConfigured } from './llm'
 
 // ---- 各格式提取纯文本 ----
 
@@ -148,10 +148,27 @@ export function htmlToText(html) {
 // ---- 文章拆分 ----
 
 function toParagraphs(text) {
-  return text
+  let paras = text
     .split(/\n\s*\n|\n(?=\S)/)
     .map((p) => p.replace(/\s*\n\s*/g, ' ').trim())
     .filter((p) => p.length > 0)
+  // 去噪:纯页码、反复出现的短行(页眉/页脚,如刊名+日期)
+  const freq = new Map()
+  for (const p of paras) {
+    if (p.length < 80) freq.set(p, (freq.get(p) || 0) + 1)
+  }
+  paras = paras.filter((p) => {
+    if (/^\d{1,4}$/.test(p)) return false
+    if (p.length < 80 && (freq.get(p) || 0) >= 3) return false
+    return true
+  })
+  return paras
+}
+
+// "By 作者名" 署名行
+function bylineOf(p) {
+  const m = /^by\s+([A-Z][\w.'’-]+(?:\s+(?:and\s+)?[A-Z][\w.'’-]+){0,5})\s*$/i.exec(p.trim())
+  return m && p.length < 60 ? m[1] : null
 }
 
 // 过长的段落按句子边界重切成适合阅读的段落(也让对照翻译的粒度更合理)
@@ -190,7 +207,7 @@ function looksLikeHeading(p) {
   return words >= 1 && words <= 14
 }
 
-// 启发式拆分:短、无句末标点的段落视作标题
+// 启发式拆分:短、无句末标点的段落视作标题;"By 作者" 行是强信号
 export function heuristicSplit(text) {
   const paras = toParagraphs(text)
   const articles = []
@@ -198,14 +215,25 @@ export function heuristicSplit(text) {
   for (let i = 0; i < paras.length; i++) {
     const p = paras[i]
     const next = paras[i + 1]
-    const isHeading = looksLikeHeading(p) && next && !looksLikeHeading(next)
+    const nextIsByline = next && bylineOf(next)
+    const isHeading =
+      looksLikeHeading(p) && next && (nextIsByline || !looksLikeHeading(next))
     // 已有正文段落时,新标题开新文章;紧跟在标题后的短行(作者/副题)并入当前篇
-    if (isHeading && (!current || current.paragraphs.length >= 1)) {
-      if (current) articles.push(current)
+    if (isHeading && (!current || current.paragraphs.length >= 1 || nextIsByline)) {
+      if (current && (current.paragraphs.length || current.title)) articles.push(current)
       current = { title: p, author: '', paragraphs: [] }
+      if (nextIsByline) {
+        current.author = bylineOf(next)
+        i++ // 署名行不进正文
+      }
     } else {
       if (!current) current = { title: '', author: '', paragraphs: [] }
-      current.paragraphs.push(p)
+      const by = bylineOf(p)
+      if (by && !current.author && current.paragraphs.length === 0) {
+        current.author = by // 标题识别失败时,散落的署名行也能补上作者
+      } else {
+        current.paragraphs.push(p)
+      }
     }
   }
   if (current && current.paragraphs.length) articles.push(current)
@@ -213,42 +241,91 @@ export function heuristicSplit(text) {
   return articles.map((a) => ({ ...a, paragraphs: normalizeParagraphs(a.paragraphs) }))
 }
 
-// LLM 辅助拆分:识别标题/作者,并用 firstWords 在原文中定位边界
+// LLM 辅助拆分 v2:全文按段落编号、分块送给模型,直接返回边界段落号。
+// 相比匹配"开头文字"更稳,且不再受采样长度限制,整本长刊都能覆盖。
 export async function smartSplit(text) {
   if (!llmConfigured()) return heuristicSplit(text)
   try {
-    const { articles: toc } = await splitArticlesLLM(text)
-    if (!toc?.length) return heuristicSplit(text)
     const paras = toParagraphs(text)
-    const boundaries = [] // [{title, author, paraIndex}]
-    let searchFrom = 0
-    for (const item of toc) {
-      const needle = (item.firstWords || '').trim().slice(0, 12)
-      if (!needle) continue
-      const idx = paras.findIndex(
-        (p, i) => i >= searchFrom && p.includes(needle)
-      )
-      if (idx >= 0) {
-        boundaries.push({ title: item.title, author: item.author, paraIndex: idx })
-        searchFrom = idx + 1
+    if (paras.length < 4) return heuristicSplit(text)
+
+    // 按 ~28k 字符分块,段落编号全局连续
+    const CHUNK_CHARS = 28000
+    const chunks = []
+    let cur = []
+    let size = 0
+    let start = 0
+    paras.forEach((p, i) => {
+      if (size > CHUNK_CHARS && cur.length) {
+        chunks.push({ start, paras: cur })
+        cur = []
+        size = 0
+        start = i
+      }
+      cur.push(p)
+      size += p.length
+    })
+    if (cur.length) chunks.push({ start, paras: cur })
+
+    const marks = []
+    for (let c = 0; c < chunks.length; c++) {
+      const chunk = chunks[c]
+      // 每段截前 300 字符足以判断边界,控制 token 消耗
+      const numbered = chunk.paras
+        .map((p, k) => `[${chunk.start + k}] ${p.length > 300 ? p.slice(0, 300) + '…' : p}`)
+        .join('\n\n')
+      const res = await findArticleBoundaries(numbered, {
+        part: c + 1,
+        totalParts: chunks.length,
+      })
+      for (const a of res.articles || []) {
+        if (
+          Number.isInteger(a.startIndex) &&
+          a.startIndex >= chunk.start &&
+          a.startIndex < chunk.start + chunk.paras.length
+        ) {
+          marks.push(a)
+        }
       }
     }
-    if (boundaries.length < 2) return heuristicSplit(text)
+    marks.sort((a, b) => a.startIndex - b.startIndex)
+    const uniq = []
+    for (const m of marks) {
+      if (!uniq.length || m.startIndex > uniq[uniq.length - 1].startIndex) uniq.push(m)
+    }
+    if (!uniq.length) return heuristicSplit(text)
+
+    // 第一篇文章之前的内容(封面/目录等)单独成篇,交给用户在确认页决定去留
+    if (uniq[0].startIndex > 0) {
+      uniq.unshift({ title: '刊首内容(目录/导言等)', author: '', startIndex: 0 })
+    }
+
     const articles = []
-    for (let b = 0; b < boundaries.length; b++) {
-      const start = boundaries[b].paraIndex
-      const end = b + 1 < boundaries.length ? boundaries[b + 1].paraIndex : paras.length
-      const body = paras
-        .slice(start, end)
-        // 去掉与标题重复的段落
-        .filter((p) => p !== boundaries[b].title)
+    for (let b = 0; b < uniq.length; b++) {
+      const startIdx = uniq[b].startIndex
+      const endIdx = b + 1 < uniq.length ? uniq[b + 1].startIndex : paras.length
+      let body = paras.slice(startIdx, endIdx)
+      // 去掉与标题重复的段落;开头的署名行转为作者
+      let author = uniq[b].author || ''
+      body = body.filter((p, k) => {
+        if (k < 2 && uniq[b].title && p.trim() === uniq[b].title.trim()) return false
+        if (k < 3) {
+          const by = bylineOf(p)
+          if (by) {
+            if (!author) author = by
+            return false
+          }
+        }
+        return true
+      })
+      if (!body.length) continue
       articles.push({
-        title: boundaries[b].title,
-        author: boundaries[b].author || '',
+        title: uniq[b].title,
+        author,
         paragraphs: normalizeParagraphs(body),
       })
     }
-    return articles
+    return articles.length ? articles : heuristicSplit(text)
   } catch (e) {
     console.warn('LLM 拆分失败,使用启发式拆分', e)
     return heuristicSplit(text)

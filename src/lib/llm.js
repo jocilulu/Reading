@@ -60,7 +60,7 @@ async function createJSON({ system, prompt, schema, maxTokens = 4096 }) {
   return JSON.parse(text)
 }
 
-// ---- 文章拆分 ----
+// ---- 文章拆分(段落编号定位,支持整本长刊分块处理) ----
 
 const SPLIT_SCHEMA = {
   type: 'object',
@@ -70,14 +70,14 @@ const SPLIT_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          title: { type: 'string' },
-          author: { type: 'string' },
-          firstWords: {
-            type: 'string',
-            description: '这篇文章正文第一句的前 20 个字符,原样摘抄,用于定位拆分点',
+          title: { type: 'string', description: '文章标题(原文语言)' },
+          author: { type: 'string', description: '作者,没有则空字符串' },
+          startIndex: {
+            type: 'integer',
+            description: '这篇文章从编号为几的段落开始(标题段或正文第一段的编号)',
           },
         },
-        required: ['title', 'author', 'firstWords'],
+        required: ['title', 'author', 'startIndex'],
         additionalProperties: false,
       },
     },
@@ -86,17 +86,23 @@ const SPLIT_SCHEMA = {
   additionalProperties: false,
 }
 
-export async function splitArticlesLLM(text) {
-  // 对长文本只取前一部分做目录识别,拆分点通过 firstWords 在原文中定位
-  const sample = text.length > 60000 ? text.slice(0, 60000) : text
+// 对编号段落列表做一次边界识别。partInfo 用于长刊分块时给模型交代上下文。
+export async function findArticleBoundaries(numberedText, { part, totalParts }) {
+  const partNote =
+    totalParts > 1
+      ? `这是整份周刊的第 ${part}/${totalParts} 部分。开头的内容可能是上一部分某篇文章的延续——只报告在本部分内“新开始”的文章,不要为延续的内容编造边界。`
+      : ''
   return createJSON({
     system:
-      '你是一个杂志内容解析助手。用户给你一份周刊的纯文本,里面包含多篇文章。' +
-      '请识别每篇文章的标题、作者(没有则留空字符串)以及正文第一句的开头原文。' +
-      '严格按出现顺序输出。不要虚构文本中不存在的文章。',
-    prompt: sample,
+      '你是杂志内容解析助手。给你的是一份周刊的段落列表,每段前有 [编号]。' +
+      '识别每篇独立文章从哪一段开始(startIndex 填该段编号),并给出标题和作者。' +
+      '判断依据:标题段(短、无句末标点)、"By 作者名" 署名行、话题的明显切换。' +
+      '目录、版权页、订阅广告等非文章内容不要算作文章。startIndex 必须是给出的编号之一,严格递增。' +
+      '不要虚构文本中不存在的文章。' +
+      partNote,
+    prompt: numberedText,
     schema: SPLIT_SCHEMA,
-    maxTokens: 8192,
+    maxTokens: 4096,
   })
 }
 
