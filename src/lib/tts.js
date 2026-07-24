@@ -12,7 +12,14 @@
 import { estimateSentenceSeconds, sha1 } from './utils'
 import { audioCacheGet, audioCachePut } from './storage'
 
-let _ttsSettings = { provider: 'browser', baseUrl: '', apiKey: '', voice: '' }
+let _ttsSettings = {
+  provider: 'browser',
+  baseUrl: '',
+  apiKey: '',
+  voice: '',
+  voiceZh: '', // 浏览器语音:用户选定的中文音色名
+  voiceEn: '', // 浏览器语音:用户选定的英文音色名
+}
 
 export function configureTTS(settings) {
   _ttsSettings = { ..._ttsSettings, ...settings }
@@ -26,17 +33,36 @@ export function ttsProviderName() {
 
 // ---- 浏览器语音选择 ----
 
-function pickVoice(lang) {
+export function listVoices(lang) {
   const voices = window.speechSynthesis?.getVoices?.() || []
   const wanted = lang === 'zh' ? 'zh' : 'en'
-  const candidates = voices.filter((v) => v.lang?.toLowerCase().startsWith(wanted))
-  // 优先本地、名字里带 Natural/Premium 的声音
-  candidates.sort((a, b) => {
-    const score = (v) =>
-      (v.localService ? 2 : 0) + (/natural|premium|enhanced/i.test(v.name) ? 1 : 0)
-    return score(b) - score(a)
-  })
-  return candidates[0] || null
+  return voices
+    .filter((v) => v.lang?.toLowerCase().startsWith(wanted))
+    .sort((a, b) => voiceScore(b) - voiceScore(a))
+}
+
+// 高质量语音的常见特征:系统增强/神经网络音色,以及各平台口碑好的具名音色
+const GOOD_NAME =
+  /siri|enhanced|premium|natural|neural|multilingual|tingting|婷婷|meijia|lili|yu-shu|samantha|ava|zoe|allison|karen|daniel|serena|google (us|uk) english|晓晓|xiaoxiao|yunxi/i
+
+function voiceScore(v) {
+  return (
+    (GOOD_NAME.test(v.name) ? 4 : 0) +
+    (v.localService ? 2 : 0) +
+    (v.default ? 1 : 0)
+  )
+}
+
+function pickVoice(lang) {
+  const candidates = listVoices(lang)
+  if (!candidates.length) return null
+  // 用户在设置里指定过音色则优先
+  const chosen = lang === 'zh' ? _ttsSettings.voiceZh : _ttsSettings.voiceEn
+  if (chosen) {
+    const match = candidates.find((v) => v.name === chosen)
+    if (match) return match
+  }
+  return candidates[0]
 }
 
 // ---- API TTS:按句生成并缓存 ----

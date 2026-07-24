@@ -49,6 +49,14 @@ function reducer(state, action) {
       }
     }
 
+    case 'updateMagazine':
+      return {
+        ...state,
+        magazines: state.magazines.map((m) =>
+          m.id === action.id ? { ...m, ...action.patch } : m
+        ),
+      }
+
     case 'updateArticle':
       return {
         ...state,

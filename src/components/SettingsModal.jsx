@@ -1,5 +1,6 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useStore } from '../store/AppStore'
+import { listVoices } from '../lib/tts'
 
 const MODELS = [
   { id: 'claude-opus-4-8', label: 'Claude Opus 4.8(默认,质量最好)' },
@@ -11,6 +12,15 @@ export default function SettingsModal({ onClose }) {
   const { state, dispatch } = useStore()
   const [llm, setLlm] = useState({ ...state.settings.llm })
   const [tts, setTts] = useState({ ...state.settings.tts })
+  const [voices, setVoices] = useState({ zh: [], en: [] })
+
+  // 枚举系统语音(部分浏览器异步加载,需监听 voiceschanged)
+  useEffect(() => {
+    const load = () => setVoices({ zh: listVoices('zh'), en: listVoices('en') })
+    load()
+    window.speechSynthesis?.addEventListener?.('voiceschanged', load)
+    return () => window.speechSynthesis?.removeEventListener?.('voiceschanged', load)
+  }, [])
 
   const save = () => {
     dispatch({ type: 'updateSettings', patch: { llm, tts } })
@@ -76,6 +86,38 @@ export default function SettingsModal({ onClose }) {
               <option value="api">TTS API(OpenAI 兼容接口)</option>
             </select>
           </label>
+          {tts.provider === 'browser' && (
+            <>
+              {['zh', 'en'].map((lg) => (
+                <label key={lg} className="block text-sm">
+                  {lg === 'zh' ? '中文音色' : '英文音色'}
+                  <select
+                    className="mt-1 w-full rounded-md border border-ink-200 dark:border-ink-700 bg-transparent px-2 py-1.5 text-sm dark:bg-ink-800"
+                    value={lg === 'zh' ? tts.voiceZh || '' : tts.voiceEn || ''}
+                    onChange={(e) =>
+                      setTts(
+                        lg === 'zh'
+                          ? { ...tts, voiceZh: e.target.value }
+                          : { ...tts, voiceEn: e.target.value }
+                      )
+                    }
+                  >
+                    <option value="">自动挑选(推荐音质最好的)</option>
+                    {voices[lg].map((v) => (
+                      <option key={v.name} value={v.name}>
+                        {v.name} ({v.lang}){v.localService ? '' : ' · 在线'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+              <p className="text-xs text-ink-700/50 dark:text-ink-100/50">
+                音质取决于系统自带语音。Mac 用户可在「系统设置 → 辅助功能 → 朗读内容 →
+                系统声音 → 管理声音」下载增强版/Siri 声音,下载后在上面选择即可,流畅度提升明显。
+                想要更自然的效果可切换到 TTS API。
+              </p>
+            </>
+          )}
           {tts.provider === 'api' && (
             <>
               <label className="block text-sm">

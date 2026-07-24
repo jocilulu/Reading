@@ -379,7 +379,12 @@ export default function ReaderPage() {
               bilingual ? 'max-w-5xl' : 'max-w-article'
             )}
           >
-            <h1 className="text-3xl font-semibold leading-snug mb-2">{article.title}</h1>
+            <EditableTitle
+              title={article.title}
+              onSave={(title) =>
+                dispatch({ type: 'updateArticle', id: article.id, patch: { title } })
+              }
+            />
             <div className="text-sm text-ink-700/50 dark:text-ink-100/50 mb-8 flex items-center gap-3">
               {article.author && <span>{article.author}</span>}
               <span>{magazineName(state, article.magazineId)}</span>
@@ -429,7 +434,7 @@ export default function ReaderPage() {
                     checked={blurTrans}
                     onChange={(e) => setBlurTrans(e.target.checked)}
                   />
-                  译文悬停显示(先自己读)
+                  中文悬停显示(先读原文)
                 </label>
               )}
               {bilingual && transState && transState !== 'error' && (
@@ -465,10 +470,28 @@ export default function ReaderPage() {
                       bilingual && 'grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 items-start'
                     )}
                   >
+                    {/* 对照模式:中文为主(左),英文原文为辅(右) */}
+                    {bilingual && (
+                      <p
+                        className={classNames(
+                          'leading-[1.9] text-[17px]',
+                          blurTrans && 'blur-[5px] hover:blur-none transition-all duration-200'
+                        )}
+                      >
+                        {translation[para.pi] || (
+                          <span className="text-ink-700/30 dark:text-ink-100/30 italic">
+                            {transState === 'error' ? '(待翻译)' : '翻译中…'}
+                          </span>
+                        )}
+                      </p>
+                    )}
                     <p
                       className={classNames(
-                        'leading-[1.9] text-[17px]',
-                        isForeign ? 'font-serif' : ''
+                        'leading-[1.9]',
+                        isForeign ? 'font-serif' : '',
+                        bilingual
+                          ? 'text-[15.5px] text-ink-700/75 dark:text-ink-100/75 md:border-l md:border-ink-100 md:dark:border-ink-800 md:pl-6'
+                          : 'text-[17px]'
                       )}
                     >
                       {para.sentences.map((s, si) => (
@@ -484,21 +507,6 @@ export default function ReaderPage() {
                         </React.Fragment>
                       ))}
                     </p>
-                    {bilingual && (
-                      <p
-                        className={classNames(
-                          'leading-[1.9] text-[16px] text-ink-700/80 dark:text-ink-100/80',
-                          'md:border-l md:border-ink-100 md:dark:border-ink-800 md:pl-6',
-                          blurTrans && 'blur-[5px] hover:blur-none transition-all duration-200'
-                        )}
-                      >
-                        {translation[para.pi] || (
-                          <span className="text-ink-700/30 dark:text-ink-100/30 italic">
-                            {transState === 'error' ? '(待翻译)' : '翻译中…'}
-                          </span>
-                        )}
-                      </p>
-                    )}
                   </div>
                   {/* Notion 风格批注气泡:大屏显示在段落右侧;速记侧栏/对照模式下改为段落下方内联 */}
                   {notesByPara.has(para.pi) && !notesOpen && !bilingual && (
@@ -673,6 +681,48 @@ function Sentence({ sentence, segs, active, isForeign, onClick }) {
         )
       })}
     </span>
+  )
+}
+
+// 文章标题:悬停出现铅笔,点击可改成自己想要的标题
+function EditableTitle({ title, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(title)
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        className="w-full text-3xl font-semibold leading-snug mb-2 bg-transparent border-b border-ink-300 dark:border-ink-600 focus:outline-none"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => {
+          if (value.trim()) onSave(value.trim())
+          setEditing(false)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.target.blur()
+          if (e.key === 'Escape') {
+            setValue(title)
+            setEditing(false)
+          }
+        }}
+      />
+    )
+  }
+  return (
+    <h1 className="group text-3xl font-semibold leading-snug mb-2">
+      {title}
+      <button
+        title="编辑标题"
+        onClick={() => {
+          setValue(title)
+          setEditing(true)
+        }}
+        className="ml-2 text-base align-middle opacity-0 group-hover:opacity-50 hover:!opacity-100"
+      >
+        ✏️
+      </button>
+    </h1>
   )
 }
 

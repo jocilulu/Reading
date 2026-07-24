@@ -23,7 +23,7 @@ async function extractPdf(file) {
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i)
     const content = await page.getTextContent()
-    // 按 y 坐标分行拼接
+    // 按 y 坐标分行
     let lastY = null
     let line = []
     const lines = []
@@ -37,9 +37,51 @@ async function extractPdf(file) {
       lastY = y
     }
     if (line.length) lines.push(line.join(''))
-    pages.push(lines.join('\n'))
+    pages.push(mergePdfLines(lines))
   }
   return pages.join('\n\n')
+}
+
+// PDF 的"行"只是排版换行,不是段落边界。把行重新拼成完整段落:
+// - 行尾连字符断词(inno-\nvation)拼回原词
+// - 只有"句末标点 + 行明显偏短(段落最后一行)"才视为段落结束
+function mergePdfLines(rawLines) {
+  const lines = rawLines.map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  if (!lines.length) return ''
+  const widths = [...lines.map((l) => l.length)].sort((a, b) => a - b)
+  const median = widths[Math.floor(widths.length / 2)] || 1
+  const paras = []
+  let cur = ''
+  const flush = () => {
+    if (cur.trim()) paras.push(cur.trim())
+    cur = ''
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const isCjk = /[一-鿿]/.test(line)
+    // 很短且无句末标点的孤行(标题/栏目名)自成一段
+    const headingLike =
+      line.length < median * 0.5 && !/[.!?,;:。!?,;:]$/.test(line) && line.length < 60
+    if (headingLike) {
+      flush()
+      paras.push(line)
+      continue
+    }
+    if (!cur) {
+      cur = line
+    } else if (/-$/.test(cur) && /^[a-z]/.test(line)) {
+      cur = cur.slice(0, -1) + line // 连字符断词
+    } else if (/[一-鿿]$/.test(cur) && isCjk) {
+      cur += line // 中文行间不加空格
+    } else {
+      cur += ' ' + line
+    }
+    const endsSentence = /[.!?。!?][”"'』」)\)]?$/.test(line)
+    const shortLine = line.length < median * 0.75
+    if (endsSentence && (shortLine || i === lines.length - 1)) flush()
+  }
+  flush()
+  return paras.join('\n\n')
 }
 
 async function extractEpub(file) {
@@ -112,6 +154,32 @@ function toParagraphs(text) {
     .filter((p) => p.length > 0)
 }
 
+// 过长的段落按句子边界重切成适合阅读的段落(也让对照翻译的粒度更合理)
+function normalizeParagraphs(paras) {
+  const MAX = 700
+  const out = []
+  for (const p of paras) {
+    if (p.length <= MAX) {
+      out.push(p)
+      continue
+    }
+    const lang = detectLanguage(p)
+    const sentences = splitSentences(p, lang)
+    let cur = ''
+    for (const s of sentences) {
+      const joined = cur ? (lang === 'zh' ? cur + s : cur + ' ' + s) : s
+      if (joined.length > MAX && cur) {
+        out.push(cur)
+        cur = s
+      } else {
+        cur = joined
+      }
+    }
+    if (cur) out.push(cur)
+  }
+  return out
+}
+
 function looksLikeHeading(p) {
   if (p.length > 80) return false
   if (/[。.!?!?,,;;:]$/.test(p)) return false
@@ -142,7 +210,7 @@ export function heuristicSplit(text) {
   }
   if (current && current.paragraphs.length) articles.push(current)
   if (!articles.length) articles.push({ title: '', author: '', paragraphs: paras })
-  return articles
+  return articles.map((a) => ({ ...a, paragraphs: normalizeParagraphs(a.paragraphs) }))
 }
 
 // LLM 辅助拆分:识别标题/作者,并用 firstWords 在原文中定位边界
@@ -177,7 +245,7 @@ export async function smartSplit(text) {
       articles.push({
         title: boundaries[b].title,
         author: boundaries[b].author || '',
-        paragraphs: body,
+        paragraphs: normalizeParagraphs(body),
       })
     }
     return articles

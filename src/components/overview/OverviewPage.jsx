@@ -50,11 +50,26 @@ export default function OverviewPage() {
           + 上传周刊
         </button>
       </div>
-      <p className="text-sm text-ink-700/50 dark:text-ink-100/50 mb-6">
-        {magazines.length
-          ? `本期已收录:${magazines.map((m) => m.name).join('、')}`
-          : '本周还没有上传周刊'}
-      </p>
+      <div className="text-sm text-ink-700/50 dark:text-ink-100/50 mb-6 flex flex-wrap items-center gap-1.5">
+        {magazines.length ? (
+          <>
+            <span>本期已收录:</span>
+            {magazines.map((m) => (
+              <MagazineChip
+                key={m.id}
+                magazine={m}
+                articleCount={state.articles.filter((a) => a.magazineId === m.id).length}
+                onRename={(name) =>
+                  dispatch({ type: 'updateMagazine', id: m.id, patch: { name } })
+                }
+                onDelete={() => dispatch({ type: 'deleteMagazine', id: m.id })}
+              />
+            ))}
+          </>
+        ) : (
+          '本周还没有上传周刊'
+        )}
+      </div>
 
       {allTags.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-5">
@@ -100,6 +115,63 @@ export default function OverviewPage() {
         <UploadModal defaultWeekKey={weekKey} onClose={() => setUploadOpen(false)} />
       )}
     </div>
+  )
+}
+
+// 周刊名称:点击铅笔即可改名(如「经济学人 7月19日刊」),🗑 删除整份周刊
+function MagazineChip({ magazine, articleCount, onRename, onDelete }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(magazine.name)
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        className="px-2 py-0.5 rounded-full border border-ink-300 dark:border-ink-600 bg-transparent text-xs w-44"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => {
+          onRename(value.trim() || magazine.name)
+          setEditing(false)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.target.blur()
+          if (e.key === 'Escape') {
+            setValue(magazine.name)
+            setEditing(false)
+          }
+        }}
+      />
+    )
+  }
+  return (
+    <span className="group px-2 py-0.5 rounded-full bg-ink-100 dark:bg-ink-700 text-xs flex items-center gap-1">
+      {magazine.name}
+      <button
+        title="重命名"
+        onClick={() => {
+          setValue(magazine.name)
+          setEditing(true)
+        }}
+        className="opacity-0 group-hover:opacity-60 hover:!opacity-100"
+      >
+        ✏️
+      </button>
+      <button
+        title="删除这份周刊"
+        onClick={() => {
+          if (
+            window.confirm(
+              `确定删除「${magazine.name}」吗?\n将同时删除其中 ${articleCount} 篇文章及相关笔记、生词。此操作不可恢复。`
+            )
+          ) {
+            onDelete()
+          }
+        }}
+        className="opacity-0 group-hover:opacity-60 hover:!opacity-100"
+      >
+        🗑️
+      </button>
+    </span>
   )
 }
 
