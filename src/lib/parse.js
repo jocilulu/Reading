@@ -269,6 +269,8 @@ function toParagraphs(text) {
     if (/^[A-Z][a-z]{2,8}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4}$/.test(p)) return false
     // 图片/插画署名行
     if (/^(Illustrations?|Photographs?|Images?|Photos?|Sources?|Chart|Graphic)s?\s*[::]/i.test(p) && p.length < 80) return false
+    // 更正/编注声明
+    if (/^(An earlier version of this|Editors?['’]? note|Correction[,::])/i.test(p) && p.length < 400) return false
     return true
   })
   return paras
@@ -277,7 +279,7 @@ function toParagraphs(text) {
 // 杂志的两类强结构信号:
 // - 文末符:经济学人等用 ■ 标记一篇文章结束
 // - 栏目行:如 "Leaders | Aoun goals"(栏目 | 题眼),出现在每篇文章开头
-const END_MARK_RE = /[■▪◼●◻□]\s*$/
+const END_MARK_RE = /[■▪◼●◻□♦◆❖✦]\s*$/
 const RUBRIC_RE = /^[A-Z0-9][\w&,''’ ]{1,32} \| \S/
 
 function countStrongSignals(paras) {
@@ -292,8 +294,13 @@ function countStrongSignals(paras) {
 function strongSignalSplit(paras) {
   const blocks = []
   let cur = []
-  for (const p of paras) {
-    if (RUBRIC_RE.test(p) && cur.length) {
+  for (let i = 0; i < paras.length; i++) {
+    const p = paras[i]
+    // 新文章开始:栏目行,或「标题行 + 下一行是 By 署名」(纽约客样式)
+    const startsArticle =
+      RUBRIC_RE.test(p) ||
+      (looksLikeHeading(p) && i + 1 < paras.length && bylineOf(paras[i + 1]))
+    if (startsArticle && cur.length) {
       blocks.push(cur)
       cur = [p]
     } else {
@@ -394,7 +401,9 @@ function normalizeParagraphs(paras) {
 
 function looksLikeHeading(p) {
   if (p.length > 80) return false
-  if (/[。.!?!?,,;;:]$/.test(p)) return false
+  // 句末标点(可后跟引号/括号)→ 是正文不是标题
+  if (/[。.!?!?,,;;::…][”"'’』」)\)]*$/.test(p)) return false
+  if (/[”"'’]$/.test(p)) return false
   // 语言按段落自身判断,混排文档里中文标题才不会被漏掉
   const lang = detectLanguage(p)
   const words = countWords(p, lang)
