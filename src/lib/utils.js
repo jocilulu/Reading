@@ -124,23 +124,34 @@ export function splitSentences(text, lang) {
       if (s) result.push(s)
     }
   } else {
-    // 英文/其他:按 .!? 后跟空白分句,避免常见缩写误切
+    // 英文/其他:先按 .!? 粗切,再做合并回填,避免缩写/小数/人名缩写被误切
     const re = /[^.!?\n]+(?:[.!?]+["'”’)\]]*|$)/g
-    let m
-    const abbrev = /\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc|e\.g|i\.e|Fig|No|U\.S|U\.K)\.$/
-    let buffer = ''
-    while ((m = re.exec(text)) !== null) {
-      const piece = m[0]
-      buffer += piece
-      if (abbrev.test(buffer.trim())) continue
-      const s = buffer.trim()
-      if (s) result.push(s)
-      buffer = ''
+    const pieces = text.match(re) || []
+    const abbrev =
+      /\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|Fig|No|Nos|Vol|pp|approx|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|U\.S|U\.K|U\.N)\.["'”’)\]]*$/
+    for (const raw of pieces) {
+      const piece = raw
+      const prev = result[result.length - 1]
+      const shouldMerge =
+        prev &&
+        // 上一句以缩写结尾
+        (abbrev.test(prev) ||
+          // 单个大写字母缩写(J. Smith),且后面还是正文
+          /\b[A-Z]\.$/.test(prev) ||
+          // 小数点被切开(3. + 5 million)
+          (/\d\.$/.test(prev) && /^\s*\d/.test(piece)) ||
+          // 新片段以小写开头,大概率是误切
+          /^\s*[a-z]/.test(piece))
+      if (shouldMerge) {
+        result[result.length - 1] = prev + piece
+      } else {
+        const s = piece.trim()
+        if (s) result.push(s)
+      }
     }
-    const rest = buffer.trim()
-    if (rest) result.push(rest)
+    for (let i = 0; i < result.length; i++) result[i] = result[i].trim()
   }
-  return result.length ? result : [text.trim()].filter(Boolean)
+  return result.length ? result.filter(Boolean) : [text.trim()].filter(Boolean)
 }
 
 // ---- 字数与时长估算 ----

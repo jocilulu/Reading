@@ -22,33 +22,123 @@ async function extractPdf(file) {
   const pages = []
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i)
+    const viewport = page.getViewport({ scale: 1 })
     const content = await page.getTextContent()
-    // 按 y 坐标分行
-    let lastY = null
-    let line = []
-    const lines = []
-    for (const item of content.items) {
-      const y = Math.round(item.transform[5])
-      if (lastY !== null && Math.abs(y - lastY) > 2) {
-        lines.push(line.join(''))
-        line = []
-      }
-      line.push(item.str)
-      lastY = y
-    }
-    if (line.length) lines.push(line.join(''))
+    const lines = extractPageLines(content.items, viewport.width)
     pages.push(mergePdfLines(lines))
   }
   return pages.join('\n\n')
+}
+
+// 版面分析:杂志多为 2-3 栏排版,必须按"栏"还原阅读顺序,
+// 否则同一行高度上左右两栏的文字会被错误拼在一起。
+// 步骤:按 y 聚成"行" → 行内按大空隙切成"段(栏内片段)" →
+// 聚类片段左边界得到栏 → 跨栏的宽行(大标题等)作为分界带,
+// 每个带内按 左栏从上到下 → 右栏从上到下 输出。
+function extractPageLines(items, pageWidth) {
+  const frags = items
+    .map((it) => {
+      const fontSize = Math.hypot(it.transform[2] || 0, it.transform[3] || 0) || 10
+      // 个别 PDF 拿不到字形宽度,用字号×字符数估算兜底
+      const w = it.width && it.width > 0 ? it.width : it.str.length * fontSize * 0.5
+      return { str: it.str, x: it.transform[4], y: it.transform[5], w }
+    })
+    .filter((f) => f.str.trim().length > 0)
+  if (!frags.length) return []
+
+  // 1) 按 y 聚成行(容差 3)
+  frags.sort((a, b) => b.y - a.y || a.x - b.x)
+  const rows = []
+  for (const f of frags) {
+    const last = rows[rows.length - 1]
+    if (last && Math.abs(last.y - f.y) <= 3) last.frags.push(f)
+    else rows.push({ y: f.y, frags: [f] })
+  }
+
+  // 2) 行内按水平大空隙(> 15pt,超过正常词距)切成栏内片段
+  const segs = []
+  for (const row of rows) {
+    row.frags.sort((a, b) => a.x - b.x)
+    let cur = null
+    for (const f of row.frags) {
+      if (cur && f.x - cur.x1 <= 15) {
+        const gap = f.x - cur.x1
+        cur.text += (gap > 1.5 ? ' ' : '') + f.str
+        cur.x1 = Math.max(cur.x1, f.x + f.w)
+      } else {
+        if (cur) segs.push(cur)
+        cur = { y: row.y, x0: f.x, x1: f.x + f.w, text: f.str }
+      }
+    }
+    if (cur) segs.push(cur)
+  }
+
+  // 3) 聚类片段左边界 → 栏起点(出现 ≥3 次的聚类才算一栏)
+  const starts = segs.map((s) => s.x0).sort((a, b) => a - b)
+  const clusters = []
+  for (const x of starts) {
+    const last = clusters[clusters.length - 1]
+    if (last && x - last.max <= 30) {
+      last.max = x
+      last.n++
+    } else {
+      clusters.push({ min: x, max: x, n: 1 })
+    }
+  }
+  const columns = clusters.filter((c) => c.n >= 3).map((c) => c.min)
+  if (columns.length <= 1) {
+    // 单栏:按 y 从上到下直接输出
+    return segs.sort((a, b) => b.y - a.y || a.x0 - b.x0).map((s) => s.text)
+  }
+
+  const colOf = (s) => {
+    let best = 0
+    for (let c = 0; c < columns.length; c++) {
+      if (s.x0 >= columns[c] - 20) best = c
+    }
+    return best
+  }
+  // 跨栏判定:文字越过了下一栏的起点(比按页宽比例判断更稳)
+  const spanning = (s) => {
+    const c = colOf(s)
+    if (c < columns.length - 1 && s.x1 > columns[c + 1] + 15) return true
+    return s.x1 - s.x0 > pageWidth * 0.55
+  }
+
+  // 4) 跨栏宽行切分成带;带内按栏序输出
+  segs.sort((a, b) => b.y - a.y || a.x0 - b.x0)
+  const out = []
+  let band = []
+  const flushBand = () => {
+    if (!band.length) return
+    for (let c = 0; c < columns.length; c++) {
+      for (const s of band) {
+        if (colOf(s) === c) out.push(s.text)
+      }
+    }
+    band = []
+  }
+  for (const s of segs) {
+    if (spanning(s)) {
+      flushBand()
+      out.push(s.text)
+      out.push('') // 跨栏标题独立成段(空行让后续合并在此断开)
+    } else {
+      band.push(s)
+    }
+  }
+  flushBand()
+  return out
 }
 
 // PDF 的"行"只是排版换行,不是段落边界。把行重新拼成完整段落:
 // - 行尾连字符断词(inno-\nvation)拼回原词
 // - 只有"句末标点 + 行明显偏短(段落最后一行)"才视为段落结束
 function mergePdfLines(rawLines) {
-  const lines = rawLines.map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean)
-  if (!lines.length) return ''
-  const widths = [...lines.map((l) => l.length)].sort((a, b) => a - b)
+  // 空字符串是上游插入的硬分段标记
+  const lines = rawLines.map((l) => l.replace(/\s+/g, ' ').trim())
+  if (!lines.some(Boolean)) return ''
+  const widths = [...lines.filter(Boolean).map((l) => l.length)].sort((a, b) => a - b)
   const median = widths[Math.floor(widths.length / 2)] || 1
   const paras = []
   let cur = ''
@@ -58,6 +148,10 @@ function mergePdfLines(rawLines) {
   }
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
+    if (!line) {
+      flush() // 硬分段标记
+      continue
+    }
     const isCjk = /[一-鿿]/.test(line)
     // 很短且无句末标点的孤行(标题/栏目名)自成一段
     const headingLike =
