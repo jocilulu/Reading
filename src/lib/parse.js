@@ -14,10 +14,13 @@ export async function extractTextFromFile(file) {
 }
 
 async function extractPdf(file) {
+  return extractPdfData(await file.arrayBuffer())
+}
+
+export async function extractPdfData(data) {
   const pdfjs = await import('pdfjs-dist')
   const workerUrl = (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default
   pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
-  const data = await file.arrayBuffer()
   const doc = await pdfjs.getDocument({ data }).promise
   const pages = []
   for (let i = 1; i <= doc.numPages; i++) {
@@ -204,12 +207,20 @@ async function extractEpub(file) {
   return parts.join('\n\n')
 }
 
-export async function extractTextFromUrl(url) {
+// 链接导入:支持网页,也支持直接指向 PDF 的链接(如 GitHub 仓库里的 raw 文件)。
+// 返回 { text, pdfBlob? }——是 PDF 时带上原件,便于保存后在阅读页查看原版。
+export async function extractFromUrl(url) {
   // 浏览器直接抓取,受目标站点 CORS 限制;失败时提示用户改用粘贴
   const res = await fetch(url)
   if (!res.ok) throw new Error(`抓取失败:HTTP ${res.status}`)
+  const contentType = res.headers.get('content-type') || ''
+  if (/pdf/i.test(contentType) || /\.pdf(\?|#|$)/i.test(url)) {
+    const pdfBlob = await res.blob()
+    const text = await extractPdfData(await pdfBlob.arrayBuffer())
+    return { text, pdfBlob }
+  }
   const html = await res.text()
-  return htmlToText(html)
+  return { text: htmlToText(html) }
 }
 
 export function htmlToText(html) {

@@ -3,7 +3,7 @@ import React, { useState } from 'react'
 import { useStore } from '../../store/AppStore'
 import {
   extractTextFromFile,
-  extractTextFromUrl,
+  extractFromUrl,
   smartSplit,
   heuristicSplit,
   finalizeArticle,
@@ -21,6 +21,7 @@ export default function UploadModal({ defaultWeekKey, onClose }) {
   const [url, setUrl] = useState('')
   const [pasted, setPasted] = useState('')
   const [file, setFile] = useState(null)
+  const [urlPdfBlob, setUrlPdfBlob] = useState(null) // 链接导入的 PDF 原件
   const [error, setError] = useState('')
   const [drafts, setDrafts] = useState([])
   const [useAI, setUseAI] = useState(llmConfigured())
@@ -36,7 +37,13 @@ export default function UploadModal({ defaultWeekKey, onClose }) {
         if (!name) setName(file.name.replace(/\.\w+$/, ''))
       } else if (sourceType === 'url') {
         if (!url.trim()) throw new Error('请输入链接')
-        text = await extractTextFromUrl(url.trim())
+        const result = await extractFromUrl(url.trim())
+        text = result.text
+        setUrlPdfBlob(result.pdfBlob || null)
+        if (result.pdfBlob && !name) {
+          const base = decodeURIComponent(url.split('/').pop() || '').replace(/\.pdf.*$/i, '')
+          if (base) setName(base)
+        }
       } else {
         text = pasted
       }
@@ -96,18 +103,19 @@ export default function UploadModal({ defaultWeekKey, onClose }) {
   }
 
   const confirm = () => {
-    const isPdf = sourceType === 'file' && file && /\.pdf$/i.test(file.name)
+    const filePdf = sourceType === 'file' && file && /\.pdf$/i.test(file.name)
+    const pdfBlob = filePdf ? file : sourceType === 'url' ? urlPdfBlob : null
     const magazine = {
       id: uid('m'),
       weekKey,
       name: name.trim() || '未命名周刊',
       sourceType,
-      hasPdf: Boolean(isPdf),
-      sourceName: file?.name || '',
+      hasPdf: Boolean(pdfBlob),
+      sourceName: file?.name || (urlPdfBlob ? decodeURIComponent(url.split('/').pop() || '') : ''),
       createdAt: Date.now(),
     }
     // 保存 PDF 原件到本机 IndexedDB,阅读页可随时查看原版(含图片)
-    if (isPdf) fileCachePut('src-' + magazine.id, file)
+    if (pdfBlob) fileCachePut('src-' + magazine.id, pdfBlob)
     const articles = drafts
       .filter((d) => d.paragraphs.length)
       .map((d, i) =>
@@ -216,12 +224,17 @@ export default function UploadModal({ defaultWeekKey, onClose }) {
                 />
               )}
               {sourceType === 'url' && (
-                <input
-                  className="w-full rounded-md border border-ink-200 dark:border-ink-700 bg-transparent px-2 py-1.5 text-sm"
-                  placeholder="https://…"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                />
+                <div className="space-y-1">
+                  <input
+                    className="w-full rounded-md border border-ink-200 dark:border-ink-700 bg-transparent px-2 py-1.5 text-sm"
+                    placeholder="https://…(网页或 PDF 文件链接)"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                  />
+                  <p className="text-xs text-ink-700/50 dark:text-ink-100/50">
+                    支持直接粘贴 PDF 链接(如 GitHub 仓库文件的 Raw 地址),手机上也能一键导入。
+                  </p>
+                </div>
               )}
               {sourceType === 'paste' && (
                 <textarea
