@@ -1,6 +1,6 @@
 // 文章阅读页:正文排版、TTS 边听边看、划线批注、生词点击、速记侧栏
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { useStore, magazineName, makeVocabEntry } from '../../store/AppStore'
+import { useStore, magazineName, makeVocabEntry, articlesOfWeek } from '../../store/AppStore'
 import { splitSentences, uid, classNames, languageLabel } from '../../lib/utils'
 import { SentencePlayer } from '../../lib/tts'
 import { translateParagraphs, llmConfigured } from '../../lib/llm'
@@ -29,27 +29,47 @@ export default function ReaderPage() {
   const [selToolbar, setSelToolbar] = useState(null) // { x, y, segs, text }
   const [hlEditor, setHlEditor] = useState(null) // { hlId, x, y }
   const [notesOpen, setNotesOpen] = useState(false)
-  const [bilingual, setBilingual] = useState(false) // 双语对照视图
-  const [blurTrans, setBlurTrans] = useState(false) // 译文悬停显示(学习模式)
-  const [transState, setTransState] = useState(null) // null | {done,total} | 'error'
+  // 阅读模式:original 原文 / zh 中文 / both 对照(外文文章有效,偏好会记住)
+  const [viewMode, setViewModeState] = useState(
+    () => state.settings.readerMode || 'original'
+  )
+  const [blurTrans, setBlurTrans] = useState(false) // 对照模式:中文悬停显示
+  const [transState, setTransState] = useState(null) // null | {done,total} | {error}
   const [pdfOpen, setPdfOpen] = useState(false)
   const [pdfUrl, setPdfUrl] = useState(null)
 
-  // ---- 句子模型 ----
+  const setViewMode = (mode) => {
+    setViewModeState(mode)
+    dispatch({ type: 'updateSettings', patch: { readerMode: mode } })
+  }
+
+  // 中文译文是否已完整
+  const zhReady = Boolean(
+    article &&
+      (article.translation || []).length === article.paragraphs.length &&
+      (article.translation || []).every(Boolean)
+  )
+  const usingZh = viewMode === 'zh' && zhReady && article?.language !== 'zh'
+  const bilingual = viewMode === 'both' && article?.language !== 'zh'
+
+  // ---- 句子模型(中文模式下基于译文构建,朗读用中文)----
   const model = useMemo(() => {
     if (!article) return null
-    const paras = article.paragraphs.map((p, pi) => ({
+    const sourceParas = usingZh ? article.translation : article.paragraphs
+    const lang = usingZh ? 'zh' : article.language
+    const prefix = usingZh ? 't' : '' // 译文句子用独立 id,避免与原文的高亮锚点混淆
+    const paras = sourceParas.map((p, pi) => ({
       pi,
-      sentences: splitSentences(p, article.language).map((text, si) => ({
-        id: `p${pi}s${si}`,
+      sentences: splitSentences(p, lang).map((text, si) => ({
+        id: `${prefix}p${pi}s${si}`,
         text,
         pi,
       })),
     }))
     const flat = paras.flatMap((p) => p.sentences)
     const indexById = new Map(flat.map((s, i) => [s.id, i]))
-    return { paras, flat, indexById }
-  }, [article?.id])
+    return { paras, flat, indexById, lang }
+  }, [article?.id, usingZh])
 
   const flushListening = useCallback(() => {
     if (accumRef.current >= 1) {
@@ -63,7 +83,7 @@ export default function ReaderPage() {
     if (!model || !article) return
     const player = new SentencePlayer({
       sentences: model.flat,
-      lang: article.language,
+      lang: model.lang,
       onSentence: (i) => setActiveIdx(i),
       onTick: (dt) => {
         accumRef.current += dt
@@ -152,24 +172,25 @@ export default function ReaderPage() {
     )
   }
 
-  // ---- 双语对照:按段落分块调用 LLM 翻译,结果持久化到文章记录 ----
+  // ---- 翻译:按段落分块调用 LLM,结果持久化到文章记录 ----
   const startTranslation = async () => {
     if (!llmConfigured()) {
-      alert('请先在「设置」里配置 Anthropic API Key,才能生成翻译。')
+      setTransState({ error: '未配置 API Key,请先到「设置」填写' })
       return
     }
     const paras = article.paragraphs
     const filled = [...(article.translation || new Array(paras.length).fill(null))]
+    while (filled.length < paras.length) filled.push(null)
     setTransState({ done: filled.filter(Boolean).length, total: paras.length })
     try {
-      // 每块累计不超过 ~5000 字符,顺序翻译,边译边存
+      // 每块累计不超过 ~3500 字符,顺序翻译,边译边存
       let i = filled.findIndex((t) => !t)
       if (i < 0) i = paras.length
       while (i < paras.length) {
         const chunk = []
         let chars = 0
         const start = i
-        while (i < paras.length && (chunk.length === 0 || chars < 5000)) {
+        while (i < paras.length && (chunk.length === 0 || chars < 3500)) {
           chunk.push(paras[i])
           chars += paras[i].length
           i++
@@ -188,19 +209,34 @@ export default function ReaderPage() {
       setTransState(null)
     } catch (e) {
       console.error('翻译失败', e)
-      setTransState('error')
+      setTransState({ error: e?.message || String(e) })
     }
   }
 
-  const toggleBilingual = () => {
-    const next = !bilingual
-    setBilingual(next)
-    if (next && !(article.translation || []).every(Boolean)) startTranslation()
-  }
+  const translatingRef = useRef(false)
+  // 进入中文/对照模式时,若译文不全则自动开始翻译
+  useEffect(() => {
+    const needZh =
+      article &&
+      article.language !== 'zh' &&
+      (viewMode === 'zh' || viewMode === 'both') &&
+      !zhReady
+    if (needZh && !translatingRef.current && llmConfigured()) {
+      translatingRef.current = true
+      startTranslation().finally(() => {
+        translatingRef.current = false
+      })
+    } else if (needZh && !llmConfigured()) {
+      setTransState({ error: '未配置 API Key,请先到「设置」填写' })
+    }
+  }, [viewMode, article?.id, zhReady])
 
   const lang = article.language
   const isForeign = lang !== 'zh'
+  // 正在展示的主栏是否为外文(中文模式下主栏是译文,不启用查词分词)
+  const displayForeign = isForeign && !usingZh
   const activeSentenceId = activeIdx >= 0 ? model.flat[activeIdx]?.id : null
+  const zhPending = viewMode === 'zh' && isForeign && !zhReady
 
   // sentenceId -> 高亮片段
   const segsBySentence = new Map()
@@ -277,7 +313,7 @@ export default function ReaderPage() {
     const sel = window.getSelection()
     if (sel && !sel.isCollapsed) return // 正在划选,忽略点击
     const word = e.target.dataset?.word
-    if (word && isForeign) {
+    if (word && displayForeign) {
       setWordQuery({
         word,
         sentence: sentence.text,
@@ -328,7 +364,7 @@ export default function ReaderPage() {
   const notesByPara = new Map()
   for (const h of state.highlights) {
     if (h.articleId !== article.id || !h.note) continue
-    const m = /^p(\d+)s/.exec(h.segs[0]?.sentenceId || '')
+    const m = /^t?p(\d+)s/.exec(h.segs[0]?.sentenceId || '')
     if (!m) continue
     const pi = Number(m[1])
     if (!notesByPara.has(pi)) notesByPara.set(pi, [])
@@ -412,20 +448,29 @@ export default function ReaderPage() {
               </button>
             </div>
 
-            {/* 视图工具行:双语对照 / 原版 PDF */}
+            {/* 视图工具行:阅读模式(原文/中文/对照)+ 原版 PDF */}
             <div className="flex flex-wrap items-center gap-2 mb-6 text-xs">
-              {article.language !== 'zh' && (
-                <button
-                  onClick={toggleBilingual}
-                  className={classNames(
-                    'px-2.5 py-1 rounded-full border transition-colors',
-                    bilingual
-                      ? 'bg-ink-800 text-white border-ink-800 dark:bg-ink-100 dark:text-ink-900 dark:border-ink-100'
-                      : 'border-ink-200 dark:border-ink-700 text-ink-700/60 dark:text-ink-100/60 hover:border-ink-400'
-                  )}
-                >
-                  🀄 中英对照
-                </button>
+              {isForeign && (
+                <div className="flex rounded-full border border-ink-200 dark:border-ink-700 overflow-hidden">
+                  {[
+                    ['original', '原文'],
+                    ['zh', '中文'],
+                    ['both', '对照'],
+                  ].map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      onClick={() => setViewMode(mode)}
+                      className={classNames(
+                        'px-3 py-1 transition-colors',
+                        viewMode === mode
+                          ? 'bg-ink-800 text-white dark:bg-ink-100 dark:text-ink-900'
+                          : 'text-ink-700/60 dark:text-ink-100/60 hover:bg-ink-100 dark:hover:bg-ink-800'
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               )}
               {bilingual && (
                 <label className="flex items-center gap-1.5 text-ink-700/60 dark:text-ink-100/60 cursor-pointer">
@@ -437,15 +482,18 @@ export default function ReaderPage() {
                   中文悬停显示(先读原文)
                 </label>
               )}
-              {bilingual && transState && transState !== 'error' && (
+              {transState?.total != null && (
                 <span className="text-ink-700/50 dark:text-ink-100/50 animate-pulse">
                   翻译中 {transState.done}/{transState.total} 段…
                 </span>
               )}
-              {bilingual && transState === 'error' && (
-                <button onClick={startTranslation} className="text-red-500 hover:underline">
-                  翻译失败,点击重试
-                </button>
+              {transState?.error && (
+                <span className="text-red-500">
+                  翻译失败:{transState.error}{' '}
+                  <button onClick={startTranslation} className="underline">
+                    重试
+                  </button>
+                </span>
               )}
               {magazine?.hasPdf && (
                 <button
@@ -462,7 +510,21 @@ export default function ReaderPage() {
               )}
             </div>
 
-            <div ref={containerRef} className="space-y-5">
+            {zhPending && (
+              /* 中文模式但译文尚未生成完:逐段显示已完成的译文 */
+              <div className="space-y-5">
+                {article.paragraphs.map((p, pi) => (
+                  <p key={pi} className="leading-[1.9] text-[17px]">
+                    {(article.translation || [])[pi] || (
+                      <span className="text-ink-700/30 dark:text-ink-100/30 italic">
+                        {transState?.error ? '(待翻译)' : '翻译中…'}
+                      </span>
+                    )}
+                  </p>
+                ))}
+              </div>
+            )}
+            <div ref={containerRef} className={classNames('space-y-5', zhPending && 'hidden')}>
               {model.paras.map((para) => (
                 <div key={para.pi} className="relative">
                   <div
@@ -496,12 +558,12 @@ export default function ReaderPage() {
                     >
                       {para.sentences.map((s, si) => (
                         <React.Fragment key={s.id}>
-                          {si > 0 && isForeign && ' '}
+                          {si > 0 && displayForeign && ' '}
                           <Sentence
                             sentence={s}
                             segs={segsBySentence.get(s.id) || []}
                             active={s.id === activeSentenceId}
-                            isForeign={isForeign}
+                            isForeign={displayForeign}
                             onClick={(e) => handleSentenceClick(e, s)}
                           />
                         </React.Fragment>
@@ -540,20 +602,11 @@ export default function ReaderPage() {
               ))}
             </div>
 
-            <div className="mt-12 pt-6 border-t border-ink-100 dark:border-ink-800 text-center">
-              {article.status !== 'read' ? (
-                <button
-                  onClick={() =>
-                    dispatch({ type: 'updateArticle', id: article.id, patch: { status: 'read' } })
-                  }
-                  className="px-5 py-2 rounded-md text-sm bg-ink-800 text-white dark:bg-ink-100 dark:text-ink-900 hover:opacity-90"
-                >
-                  ✓ 我读完了
-                </button>
-              ) : (
-                <span className="text-sm text-green-600 dark:text-green-400">已读完 🎉</span>
-              )}
-            </div>
+            <EndOfArticleNav
+              article={article}
+              state={state}
+              dispatch={dispatch}
+            />
           </article>
         </div>
       </div>
@@ -681,6 +734,78 @@ function Sentence({ sentence, segs, active, isForeign, onClick }) {
         )
       })}
     </span>
+  )
+}
+
+// 文末导航:标记读完 + 返回本期 / 上一篇 / 下一篇
+function EndOfArticleNav({ article, state, dispatch }) {
+  const list = articlesOfWeek(state, article.weekKey)
+  const idx = list.findIndex((a) => a.id === article.id)
+  const prev = idx > 0 ? list[idx - 1] : null
+  const next = idx >= 0 && idx + 1 < list.length ? list[idx + 1] : null
+  const unreadLeft = list.filter((a) => a.id !== article.id && a.status !== 'read').length
+
+  const goto = (id) =>
+    dispatch({ type: 'navigate', route: { page: 'reader', articleId: id } })
+  const markRead = () =>
+    dispatch({ type: 'updateArticle', id: article.id, patch: { status: 'read' } })
+
+  return (
+    <div className="mt-12 pt-6 border-t border-ink-100 dark:border-ink-800">
+      <div className="text-center mb-6">
+        {article.status !== 'read' ? (
+          <button
+            onClick={markRead}
+            className="px-5 py-2 rounded-md text-sm bg-ink-800 text-white dark:bg-ink-100 dark:text-ink-900 hover:opacity-90"
+          >
+            ✓ 我读完了
+          </button>
+        ) : (
+          <span className="text-sm text-green-600 dark:text-green-400">
+            已读完 🎉{unreadLeft > 0 ? ` 本期还剩 ${unreadLeft} 篇` : ' 本期全部读完!'}
+          </span>
+        )}
+      </div>
+      <div className="flex items-stretch gap-2">
+        {prev ? (
+          <button
+            onClick={() => goto(prev.id)}
+            className="flex-1 min-w-0 text-left px-4 py-3 rounded-xl border border-ink-200 dark:border-ink-700 hover:bg-ink-50 dark:hover:bg-ink-800 transition-colors"
+          >
+            <div className="text-xs text-ink-700/40 dark:text-ink-100/40 mb-0.5">← 上一篇</div>
+            <div className="text-sm font-medium truncate">{prev.title}</div>
+          </button>
+        ) : (
+          <div className="flex-1" />
+        )}
+        <button
+          onClick={() =>
+            dispatch({
+              type: 'navigate',
+              route: { page: 'overview', weekKey: article.weekKey, articleId: null },
+            })
+          }
+          className="shrink-0 px-4 py-3 rounded-xl border border-ink-200 dark:border-ink-700 hover:bg-ink-50 dark:hover:bg-ink-800 text-sm text-ink-700/70 dark:text-ink-100/70 transition-colors"
+        >
+          返回本期
+        </button>
+        {next ? (
+          <button
+            onClick={() => {
+              markRead()
+              goto(next.id)
+            }}
+            className="flex-1 min-w-0 text-right px-4 py-3 rounded-xl border border-ink-200 dark:border-ink-700 hover:bg-ink-50 dark:hover:bg-ink-800 transition-colors"
+            title="标记本篇已读并打开下一篇"
+          >
+            <div className="text-xs text-ink-700/40 dark:text-ink-100/40 mb-0.5">下一篇 →</div>
+            <div className="text-sm font-medium truncate">{next.title}</div>
+          </button>
+        ) : (
+          <div className="flex-1" />
+        )}
+      </div>
+    </div>
   )
 }
 

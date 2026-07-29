@@ -27,6 +27,41 @@ export default function SettingsModal({ onClose }) {
     onClose()
   }
 
+  const exportData = () => {
+    const raw = localStorage.getItem('wrc-state-v1') || '{}'
+    const blob = new Blob([raw], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const d = new Date()
+    a.href = url
+    a.download = `阅读伴侣备份-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const importData = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      const text = await file.text()
+      const data = JSON.parse(text)
+      if (!Array.isArray(data.articles) || !Array.isArray(data.magazines)) {
+        throw new Error('文件格式不对')
+      }
+      if (
+        !window.confirm(
+          `导入包含 ${data.magazines.length} 份周刊、${data.articles.length} 篇文章的数据,将覆盖本设备现有数据。继续吗?`
+        )
+      ) {
+        return
+      }
+      localStorage.setItem('wrc-state-v1', text)
+      window.location.reload()
+    } catch (err) {
+      alert('导入失败:' + err.message)
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4"
@@ -152,6 +187,29 @@ export default function SettingsModal({ onClose }) {
               </p>
             </>
           )}
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="text-sm font-medium text-ink-700/70 dark:text-ink-100/70">
+            数据迁移(在手机/其他设备上查看)
+          </h3>
+          <p className="text-xs text-ink-700/50 dark:text-ink-100/50">
+            数据保存在每台设备的浏览器里,不会自动同步。在电脑上「导出」得到一个文件,
+            传到手机(微信/隔空投送均可)后在手机浏览器里打开本站「导入」即可。
+            注:PDF 原件体积大,不包含在导出文件中。
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={exportData}
+              className="px-3 py-1.5 rounded-md text-sm border border-ink-200 dark:border-ink-700 hover:bg-ink-100 dark:hover:bg-ink-700"
+            >
+              ⬇️ 导出数据
+            </button>
+            <label className="px-3 py-1.5 rounded-md text-sm border border-ink-200 dark:border-ink-700 hover:bg-ink-100 dark:hover:bg-ink-700 cursor-pointer">
+              ⬆️ 导入数据
+              <input type="file" accept=".json" className="hidden" onChange={importData} />
+            </label>
+          </div>
         </section>
 
         <div className="flex justify-end gap-2 pt-2">

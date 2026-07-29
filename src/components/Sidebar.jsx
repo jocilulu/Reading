@@ -10,14 +10,17 @@ const NAV = [
   { key: 'stats', icon: '📊', label: '收听统计' },
 ]
 
-export default function Sidebar({ open, onToggle, onOpenSettings }) {
+export default function Sidebar({ open, onToggle, onOpenSettings, onNavigate }) {
   const { state, dispatch } = useStore()
   const page = state.route.page
 
   if (!open) return null
 
   return (
-    <aside className="w-56 shrink-0 border-r border-ink-100 dark:border-ink-800 bg-ink-50 dark:bg-ink-800/40 flex flex-col">
+    <>
+      {/* 手机上侧边栏为抽屉,点遮罩关闭 */}
+      <div className="md:hidden fixed inset-0 bg-black/30 z-30" onClick={onToggle} />
+      <aside className="w-56 shrink-0 border-r border-ink-100 dark:border-ink-800 bg-ink-50 dark:bg-ink-800/40 flex flex-col max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:bg-white max-md:dark:bg-ink-900">
       <div className="flex items-center justify-between px-4 py-4">
         <div className="font-semibold text-ink-800 dark:text-ink-50">
           周刊阅读伴侣
@@ -34,9 +37,10 @@ export default function Sidebar({ open, onToggle, onOpenSettings }) {
         {NAV.map((item) => (
           <button
             key={item.key}
-            onClick={() =>
+            onClick={() => {
               dispatch({ type: 'navigate', route: { page: item.key, articleId: null } })
-            }
+              onNavigate?.()
+            }}
             className={classNames(
               'w-full text-left px-3 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors',
               page === item.key
@@ -68,6 +72,7 @@ export default function Sidebar({ open, onToggle, onOpenSettings }) {
           ⚙️ 设置
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   )
 }

@@ -12,9 +12,13 @@ import SettingsModal from './components/SettingsModal'
 
 export default function App() {
   const { state } = useStore()
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  // 手机上默认收起侧边栏,避免占据大半屏幕
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => typeof window === 'undefined' || window.innerWidth >= 768
+  )
   const [settingsOpen, setSettingsOpen] = useState(false)
   const page = state.route.page
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -22,6 +26,9 @@ export default function App() {
         open={sidebarOpen}
         onToggle={() => setSidebarOpen((v) => !v)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onNavigate={() => {
+          if (isMobile) setSidebarOpen(false) // 手机上选完页面自动收起
+        }}
       />
       <div className="flex-1 flex flex-col min-w-0">
         <Breadcrumbs
