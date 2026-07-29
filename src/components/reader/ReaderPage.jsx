@@ -739,7 +739,10 @@ function Sentence({ sentence, segs, active, isForeign, onClick }) {
 
 // 文末导航:标记读完 + 返回本期 / 上一篇 / 下一篇
 function EndOfArticleNav({ article, state, dispatch }) {
-  const list = articlesOfWeek(state, article.weekKey)
+  // 上一篇/下一篇在同一本周刊内导航
+  const list = articlesOfWeek(state, article.weekKey).filter(
+    (a) => a.magazineId === article.magazineId
+  )
   const idx = list.findIndex((a) => a.id === article.id)
   const prev = idx > 0 ? list[idx - 1] : null
   const next = idx >= 0 && idx + 1 < list.length ? list[idx + 1] : null
@@ -762,7 +765,7 @@ function EndOfArticleNav({ article, state, dispatch }) {
           </button>
         ) : (
           <span className="text-sm text-green-600 dark:text-green-400">
-            已读完 🎉{unreadLeft > 0 ? ` 本期还剩 ${unreadLeft} 篇` : ' 本期全部读完!'}
+            已读完 🎉{unreadLeft > 0 ? ` 本刊还剩 ${unreadLeft} 篇` : ' 本刊全部读完!'}
           </span>
         )}
       </div>

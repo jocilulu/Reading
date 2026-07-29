@@ -1,6 +1,6 @@
 // 每周概览页:文章卡片、标签筛选、拖拽排序、⭐ 优先
 import React, { useMemo, useState } from 'react'
-import { useStore, useCurrentWeekKey, articlesOfWeek, magazineName } from '../../store/AppStore'
+import { useStore, useCurrentWeekKey, articlesOfWeek } from '../../store/AppStore'
 import UploadModal from '../upload/UploadModal'
 import { weekLabel, languageLabel, classNames } from '../../lib/utils'
 
@@ -30,6 +30,10 @@ export default function OverviewPage() {
 
   const handleDrop = (targetId) => {
     if (!dragId || dragId === targetId) return
+    // 拖拽排序限定在同一本周刊内
+    const dragged = articles.find((a) => a.id === dragId)
+    const target = articles.find((a) => a.id === targetId)
+    if (!dragged || !target || dragged.magazineId !== target.magazineId) return
     const ids = articles.map((a) => a.id)
     const from = ids.indexOf(dragId)
     const to = ids.indexOf(targetId)
@@ -38,6 +42,17 @@ export default function OverviewPage() {
     dispatch({ type: 'reorderArticles', orderedIds: ids })
     setDragId(null)
   }
+
+  // 按周刊分组
+  const groups = magazines
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((m) => ({
+      magazine: m,
+      articles: shown.filter((a) => a.magazineId === m.id),
+      total: articles.filter((a) => a.magazineId === m.id).length,
+    }))
+    .filter((g) => g.articles.length > 0 || !tagFilter)
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8">
@@ -50,26 +65,11 @@ export default function OverviewPage() {
           + 上传周刊
         </button>
       </div>
-      <div className="text-sm text-ink-700/50 dark:text-ink-100/50 mb-6 flex flex-wrap items-center gap-1.5">
-        {magazines.length ? (
-          <>
-            <span>本期已收录:</span>
-            {magazines.map((m) => (
-              <MagazineChip
-                key={m.id}
-                magazine={m}
-                articleCount={state.articles.filter((a) => a.magazineId === m.id).length}
-                onRename={(name) =>
-                  dispatch({ type: 'updateMagazine', id: m.id, patch: { name } })
-                }
-                onDelete={() => dispatch({ type: 'deleteMagazine', id: m.id })}
-              />
-            ))}
-          </>
-        ) : (
-          '本周还没有上传周刊'
-        )}
-      </div>
+      <p className="text-sm text-ink-700/50 dark:text-ink-100/50 mb-6">
+        {magazines.length
+          ? `本期收录 ${magazines.length} 本周刊,共 ${articles.length} 篇文章`
+          : '本周还没有上传周刊'}
+      </p>
 
       {allTags.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-5">
@@ -84,29 +84,54 @@ export default function OverviewPage() {
         </div>
       )}
 
-      {shown.length === 0 ? (
+      {articles.length === 0 ? (
         <div className="text-center py-24 text-ink-700/40 dark:text-ink-100/40 text-sm">
-          {articles.length === 0
-            ? '点击右上角「上传周刊」,把这周想看的内容交给我吧'
-            : '该标签下没有文章'}
+          点击右上角「上传周刊」,把这周想看的内容交给我吧
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {shown.map((a) => (
-            <ArticleCard
-              key={a.id}
-              article={a}
-              magazine={magazineName(state, a.magazineId)}
-              draggable={!tagFilter}
-              onDragStart={() => setDragId(a.id)}
-              onDrop={() => handleDrop(a.id)}
-              onOpen={() =>
-                dispatch({ type: 'navigate', route: { page: 'reader', articleId: a.id } })
+        <div className="space-y-6">
+          {groups.map((g) => (
+            <MagazineSection
+              key={g.magazine.id}
+              magazine={g.magazine}
+              total={g.total}
+              filtered={Boolean(tagFilter)}
+              onRename={(name) =>
+                dispatch({ type: 'updateMagazine', id: g.magazine.id, patch: { name } })
               }
-              onToggleStar={() =>
-                dispatch({ type: 'updateArticle', id: a.id, patch: { starred: !a.starred } })
-              }
-            />
+              onDelete={() => dispatch({ type: 'deleteMagazine', id: g.magazine.id })}
+            >
+              {g.articles.length === 0 ? (
+                <p className="text-sm text-ink-700/40 dark:text-ink-100/40 py-3">
+                  该标签下没有文章
+                </p>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {g.articles.map((a) => (
+                    <ArticleCard
+                      key={a.id}
+                      article={a}
+                      draggable={!tagFilter}
+                      onDragStart={() => setDragId(a.id)}
+                      onDrop={() => handleDrop(a.id)}
+                      onOpen={() =>
+                        dispatch({
+                          type: 'navigate',
+                          route: { page: 'reader', articleId: a.id },
+                        })
+                      }
+                      onToggleStar={() =>
+                        dispatch({
+                          type: 'updateArticle',
+                          id: a.id,
+                          patch: { starred: !a.starred },
+                        })
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </MagazineSection>
           ))}
         </div>
       )}
@@ -118,60 +143,79 @@ export default function OverviewPage() {
   )
 }
 
-// 周刊名称:点击铅笔即可改名(如「经济学人 7月19日刊」),🗑 删除整份周刊
-function MagazineChip({ magazine, articleCount, onRename, onDelete }) {
+// 周刊分区:可折叠的分组标题(改名 / 删除 / 篇数),文章卡片归属各自周刊
+function MagazineSection({ magazine, total, filtered, onRename, onDelete, children }) {
+  const [collapsed, setCollapsed] = useState(false)
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(magazine.name)
-  if (editing) {
-    return (
-      <input
-        autoFocus
-        className="px-2 py-0.5 rounded-full border border-ink-300 dark:border-ink-600 bg-transparent text-xs w-44"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={() => {
-          onRename(value.trim() || magazine.name)
-          setEditing(false)
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') e.target.blur()
-          if (e.key === 'Escape') {
-            setValue(magazine.name)
-            setEditing(false)
-          }
-        }}
-      />
-    )
-  }
+
   return (
-    <span className="group px-2 py-0.5 rounded-full bg-ink-100 dark:bg-ink-700 text-xs flex items-center gap-1">
-      {magazine.name}
-      <button
-        title="重命名"
-        onClick={() => {
-          setValue(magazine.name)
-          setEditing(true)
-        }}
-        className="opacity-0 group-hover:opacity-60 hover:!opacity-100"
-      >
-        ✏️
-      </button>
-      <button
-        title="删除这份周刊"
-        onClick={() => {
-          if (
-            window.confirm(
-              `确定删除「${magazine.name}」吗?\n将同时删除其中 ${articleCount} 篇文章及相关笔记、生词。此操作不可恢复。`
-            )
-          ) {
-            onDelete()
-          }
-        }}
-        className="opacity-0 group-hover:opacity-60 hover:!opacity-100"
-      >
-        🗑️
-      </button>
-    </span>
+    <section className="border border-ink-200 dark:border-ink-700 rounded-2xl overflow-hidden">
+      <div className="group flex items-center gap-2 px-4 py-3 bg-ink-50/70 dark:bg-ink-800/50">
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          className="text-ink-700/50 dark:text-ink-100/50 w-5 text-left"
+          title={collapsed ? '展开' : '收起'}
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
+        {editing ? (
+          <input
+            autoFocus
+            className="flex-1 min-w-0 rounded-md border border-ink-300 dark:border-ink-600 bg-transparent px-2 py-0.5 text-sm font-medium"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onBlur={() => {
+              onRename(value.trim() || magazine.name)
+              setEditing(false)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.target.blur()
+              if (e.key === 'Escape') {
+                setValue(magazine.name)
+                setEditing(false)
+              }
+            }}
+          />
+        ) : (
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            className="flex-1 min-w-0 text-left text-sm font-medium truncate"
+          >
+            📰 {magazine.name}
+            <span className="ml-2 text-xs font-normal text-ink-700/40 dark:text-ink-100/40">
+              {total} 篇{filtered ? '(筛选中)' : ''}
+            </span>
+          </button>
+        )}
+        <button
+          title="重命名"
+          onClick={() => {
+            setValue(magazine.name)
+            setEditing(true)
+          }}
+          className="opacity-0 group-hover:opacity-60 hover:!opacity-100 text-sm"
+        >
+          ✏️
+        </button>
+        <button
+          title="删除这份周刊"
+          onClick={() => {
+            if (
+              window.confirm(
+                `确定删除「${magazine.name}」吗?\n将同时删除其中 ${total} 篇文章及相关笔记、生词。此操作不可恢复。`
+              )
+            ) {
+              onDelete()
+            }
+          }}
+          className="opacity-0 group-hover:opacity-60 hover:!opacity-100 text-sm"
+        >
+          🗑️
+        </button>
+      </div>
+      {!collapsed && <div className="p-3">{children}</div>}
+    </section>
   )
 }
 
@@ -254,7 +298,7 @@ export function ArticleCard({
           </span>
         ))}
         <span className="ml-auto text-ink-700/40 dark:text-ink-100/40">
-          {magazine} · 读 {article.readMinutes} 分 / 听 {article.listenMinutes} 分
+          {magazine ? `${magazine} · ` : ''}读 {article.readMinutes} 分 / 听 {article.listenMinutes} 分
         </span>
       </div>
     </div>
