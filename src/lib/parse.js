@@ -252,10 +252,10 @@ export function htmlToText(html) {
 
 // ---- 文章拆分 ----
 
-function toParagraphs(text) {
+export function toParagraphs(text) {
   let paras = text
     .split(/\n\s*\n|\n(?=\S)/)
-    .map((p) => p.replace(/\s*\n\s*/g, ' ').trim())
+    .map((p) => p.replace(/\s*\n\s*/g, ' ').replace(/<\/?[a-z][^>]{0,40}>/gi, '').trim())
     .filter((p) => p.length > 0)
   // 去噪:纯页码、反复出现的短行(页眉/页脚,如刊名+日期)
   const freq = new Map()
@@ -271,9 +271,41 @@ function toParagraphs(text) {
     if (/^(Illustrations?|Photographs?|Images?|Photos?|Sources?|Chart|Graphic)s?\s*[::]/i.test(p) && p.length < 80) return false
     // 更正/编注声明
     if (/^(An earlier version of this|Editors?['’]? note|Correction[,::])/i.test(p) && p.length < 400) return false
+    // 网页导出式 PDF(如大西洋月刊)的噪音:
+    // 相关文章链接行
+    if (/^(Read|Listen|Watch|From the archives?)[::]/i.test(p) && p.length < 160) return false
+    // URL 残片(路径/数字ID)
+    if (/^[\w-]+(?:\/[\w-]+)*\/\d{3,}\/?$/.test(p)) return false
+    // 图片署名:整段括号、或以 "for The Xxx)" / "/ Getty)" 结尾的短段、断裂的括号片段
+    if (/^\(.{0,220}\)$/.test(p)) return false
+    if (p.length < 250 && /(?:for The [A-Z][\w ]*|\/ ?Getty(?: Images)?|Getty)\)$/.test(p)) return false
+    if (p.length < 200 && /^\([^)]+$/.test(p)) return false
+    if (p.length < 40 && /^[A-Z][\w ]{0,32}\)$/.test(p)) return false
+    if (p.length < 320 && /^for The [A-Z][\w ]+;/.test(p)) return false
     return true
   })
+  // 网页导出式 PDF 的导航行(| Next | Section menu | Main menu | …)。
+  // 导航行是文章页组的开头,把它转成 \x01 标记的文章起点段;纯导航行丢弃。
+  const NAV_PREFIX =
+    /^(?:\|\s*)?(?:(?:Next|Previous)(?: section)?|Section menu|Main menu)(?:\s*\|\s*(?:(?:Next|Previous)(?: section)?|Section menu|Main menu))*\s*\|?\s*/i
+  const NAV_SUFFIX = /\s*\|\s*(?:(?:Next|Previous)(?: section)?|Section menu|Main menu)\s*\|.*$/i
   return paras
+    .map((p) => {
+      if (NAV_PREFIX.test(p)) {
+        const rest = p.replace(NAV_PREFIX, '').trim()
+        return rest ? '\x01' + rest : ''
+      }
+      if (NAV_SUFFIX.test(p)) {
+        const rest = p.replace(NAV_SUFFIX, '').trim()
+        return rest ? '\x01' + rest : ''
+      }
+      return p
+    })
+    .filter(Boolean)
+}
+
+export function stripStartMarker(p) {
+  return p.startsWith('\x01') ? p.slice(1) : p
 }
 
 // 杂志的两类强结构信号:
@@ -285,7 +317,7 @@ const RUBRIC_RE = /^[A-Z0-9][\w&,''’ ]{1,32} \| \S/
 function countStrongSignals(paras) {
   let n = 0
   for (const p of paras) {
-    if (END_MARK_RE.test(p) || RUBRIC_RE.test(p)) n++
+    if (END_MARK_RE.test(p) || RUBRIC_RE.test(p) || p.startsWith('\x01')) n++
   }
   return n
 }
@@ -298,6 +330,7 @@ function strongSignalSplit(paras) {
     const p = paras[i]
     // 新文章开始:栏目行,或「标题行 + 下一行是 By 署名」(纽约客样式)
     const startsArticle =
+      p.startsWith('\x01') ||
       RUBRIC_RE.test(p) ||
       (looksLikeHeading(p) && i + 1 < paras.length && bylineOf(paras[i + 1]))
     if (startsArticle && cur.length) {
@@ -313,13 +346,39 @@ function strongSignalSplit(paras) {
   }
   if (cur.length) blocks.push(cur)
 
+  // 目录页里的短标题行,用于给"标题+导语"融合段做前缀匹配
+  const tocTitles = paras
+    .map((p) => (p.startsWith('\x01') ? '' : p))
+    .filter((p) => p && p.length >= 8 && p.length <= 70 && looksLikeHeading(p))
+
   const articles = []
   blocks.forEach((block, bi) => {
     // 去掉文末符
     block = block.map((p) => p.replace(END_MARK_RE, '').trim()).filter(Boolean)
     if (!block.length) return
+    let markerTitle = ''
+    if (block[0].startsWith('\x01')) {
+      const content = block[0].slice(1)
+      if (content.length <= 90) {
+        markerTitle = content
+        block.shift()
+      } else {
+        // 融合段:标题 + 导语连在一起,用目录标题做最长前缀匹配
+        const hit = tocTitles
+          .filter((t) => content.startsWith(t) && content.length > t.length + 10)
+          .sort((a, b) => b.length - a.length)[0]
+        if (hit) {
+          markerTitle = hit
+          block[0] = content.slice(hit.length).trim() // 剩余部分是导语,留在正文
+        } else {
+          const cut = content.slice(0, 64)
+          markerTitle = cut.slice(0, cut.lastIndexOf(' ') > 20 ? cut.lastIndexOf(' ') : 64)
+          block[0] = content
+        }
+      }
+    }
     let rubric = ''
-    if (RUBRIC_RE.test(block[0])) rubric = block.shift()
+    if (block.length && RUBRIC_RE.test(block[0])) rubric = block.shift()
     // 开头连续的标题行(最多 3 行拼成完整标题)与署名行
     const titleLines = []
     let author = ''
@@ -338,7 +397,8 @@ function strongSignalSplit(paras) {
       }
       break
     }
-    let title = titleLines.join(' ')
+    let title = markerTitle || titleLines.join(' ')
+    if (markerTitle && titleLines.length) block.unshift(...titleLines) // 标记标题已定,原标题行还给正文
     if (!title && rubric) title = rubric.split('|')[1]?.trim() || rubric
     if (!title && bi === 0) title = '刊首内容(封面/目录等)'
     const bodyChars = block.join('').length
@@ -413,12 +473,13 @@ function looksLikeHeading(p) {
 
 // 启发式拆分:短、无句末标点的段落视作标题;"By 作者" 行是强信号
 export function heuristicSplit(text) {
-  const paras = toParagraphs(text)
+  const rawParas = toParagraphs(text)
   // 文末符/栏目行足够多时,用确定性的强信号切分(经济学人等刊物)
-  if (countStrongSignals(paras) >= 4) {
-    const strong = strongSignalSplit(paras)
+  if (countStrongSignals(rawParas) >= 4) {
+    const strong = strongSignalSplit(rawParas)
     if (strong.length >= 2) return strong
   }
+  const paras = rawParas.map(stripStartMarker)
   const articles = []
   let current = null
   for (let i = 0; i < paras.length; i++) {
@@ -455,13 +516,14 @@ export function heuristicSplit(text) {
 export async function smartSplit(text) {
   if (!llmConfigured()) return heuristicSplit(text)
   try {
-    const paras = toParagraphs(text)
-    if (paras.length < 4) return heuristicSplit(text)
+    const rawParas = toParagraphs(text)
+    if (rawParas.length < 4) return heuristicSplit(text)
     // 强结构信号充足时直接确定性切分:比 LLM 更快、更准、零成本
-    if (countStrongSignals(paras) >= 8) {
-      const strong = strongSignalSplit(paras)
+    if (countStrongSignals(rawParas) >= 8) {
+      const strong = strongSignalSplit(rawParas)
       if (strong.length >= 3) return strong
     }
+    const paras = rawParas.map(stripStartMarker)
 
     // 按 ~28k 字符分块,段落编号全局连续
     const CHUNK_CHARS = 28000
