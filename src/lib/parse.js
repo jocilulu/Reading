@@ -35,7 +35,7 @@ async function extractPdf(file) {
 // 步骤:按 y 聚成"行" → 行内按大空隙切成"段(栏内片段)" →
 // 聚类片段左边界得到栏 → 跨栏的宽行(大标题等)作为分界带,
 // 每个带内按 左栏从上到下 → 右栏从上到下 输出。
-function extractPageLines(items, pageWidth) {
+export function extractPageLines(items, pageWidth) {
   const frags = items
     .map((it) => {
       const fontSize = Math.hypot(it.transform[2] || 0, it.transform[3] || 0) || 10
@@ -134,7 +134,7 @@ function extractPageLines(items, pageWidth) {
 // PDF 的"行"只是排版换行,不是段落边界。把行重新拼成完整段落:
 // - 行尾连字符断词(inno-\nvation)拼回原词
 // - 只有"句末标点 + 行明显偏短(段落最后一行)"才视为段落结束
-function mergePdfLines(rawLines) {
+export function mergePdfLines(rawLines) {
   // 空字符串是上游插入的硬分段标记
   const lines = rawLines.map((l) => l.replace(/\s+/g, ' ').trim())
   if (!lines.some(Boolean)) return ''
@@ -254,9 +254,99 @@ function toParagraphs(text) {
   paras = paras.filter((p) => {
     if (/^\d{1,4}$/.test(p)) return false
     if (p.length < 80 && (freq.get(p) || 0) >= 3) return false
+    // 纯日期行(Jul 23rd 2026 / July 23, 2026)
+    if (/^[A-Z][a-z]{2,8}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4}$/.test(p)) return false
+    // 图片/插画署名行
+    if (/^(Illustrations?|Photographs?|Images?|Photos?|Sources?|Chart|Graphic)s?\s*[::]/i.test(p) && p.length < 80) return false
     return true
   })
   return paras
+}
+
+// 杂志的两类强结构信号:
+// - 文末符:经济学人等用 ■ 标记一篇文章结束
+// - 栏目行:如 "Leaders | Aoun goals"(栏目 | 题眼),出现在每篇文章开头
+const END_MARK_RE = /[■▪◼●◻□]\s*$/
+const RUBRIC_RE = /^[A-Z0-9][\w&,''’ ]{1,32} \| \S/
+
+function countStrongSignals(paras) {
+  let n = 0
+  for (const p of paras) {
+    if (END_MARK_RE.test(p) || RUBRIC_RE.test(p)) n++
+  }
+  return n
+}
+
+// 强信号切分:按 文末符/栏目行 切块,块内组装标题(合并换行标题、吸收署名)
+function strongSignalSplit(paras) {
+  const blocks = []
+  let cur = []
+  for (const p of paras) {
+    if (RUBRIC_RE.test(p) && cur.length) {
+      blocks.push(cur)
+      cur = [p]
+    } else {
+      cur.push(p)
+      if (END_MARK_RE.test(p)) {
+        blocks.push(cur)
+        cur = []
+      }
+    }
+  }
+  if (cur.length) blocks.push(cur)
+
+  const articles = []
+  blocks.forEach((block, bi) => {
+    // 去掉文末符
+    block = block.map((p) => p.replace(END_MARK_RE, '').trim()).filter(Boolean)
+    if (!block.length) return
+    let rubric = ''
+    if (RUBRIC_RE.test(block[0])) rubric = block.shift()
+    // 开头连续的标题行(最多 3 行拼成完整标题)与署名行
+    const titleLines = []
+    let author = ''
+    while (block.length && titleLines.length < 3) {
+      const p = block[0]
+      const by = bylineOf(p)
+      if (by) {
+        if (!author) author = by
+        block.shift()
+        continue
+      }
+      if (looksLikeHeading(p)) {
+        titleLines.push(p)
+        block.shift()
+        continue
+      }
+      break
+    }
+    let title = titleLines.join(' ')
+    if (!title && rubric) title = rubric.split('|')[1]?.trim() || rubric
+    if (!title && bi === 0) title = '刊首内容(封面/目录等)'
+    const bodyChars = block.join('').length
+
+    // 订阅/推广块:整块丢弃
+    const PROMO_RE =
+      /^(stay on top|subscribe|sign up|listen to|download the|read more of|for more coverage|get a daily)/i
+    if (PROMO_RE.test(titleLines[0] || block[0] || '') && block.length <= 4) return
+
+    // 无标题的小块(作者简介、编者按等):并入上一篇
+    if (!rubric && !titleLines.length && bi > 0 && block.length <= 4 && articles.length) {
+      articles[articles.length - 1].paragraphs.push(...normalizeParagraphs(block))
+      return
+    }
+
+    // 分区页/目录碎片:正文过少,丢弃
+    if (!block.length) return
+    if (!rubric && block.length <= 2 && bodyChars < 450) return
+
+    articles.push({
+      title: title || block[0].slice(0, 40),
+      author,
+      paragraphs: normalizeParagraphs(block),
+    })
+  })
+  return articles
 }
 
 // "By 作者名" 署名行
@@ -304,6 +394,11 @@ function looksLikeHeading(p) {
 // 启发式拆分:短、无句末标点的段落视作标题;"By 作者" 行是强信号
 export function heuristicSplit(text) {
   const paras = toParagraphs(text)
+  // 文末符/栏目行足够多时,用确定性的强信号切分(经济学人等刊物)
+  if (countStrongSignals(paras) >= 4) {
+    const strong = strongSignalSplit(paras)
+    if (strong.length >= 2) return strong
+  }
   const articles = []
   let current = null
   for (let i = 0; i < paras.length; i++) {
@@ -342,6 +437,11 @@ export async function smartSplit(text) {
   try {
     const paras = toParagraphs(text)
     if (paras.length < 4) return heuristicSplit(text)
+    // 强结构信号充足时直接确定性切分:比 LLM 更快、更准、零成本
+    if (countStrongSignals(paras) >= 8) {
+      const strong = strongSignalSplit(paras)
+      if (strong.length >= 3) return strong
+    }
 
     // 按 ~28k 字符分块,段落编号全局连续
     const CHUNK_CHARS = 28000
