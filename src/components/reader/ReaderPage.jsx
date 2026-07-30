@@ -402,12 +402,84 @@ export default function ReaderPage() {
       )}
 
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        <AudioPlayer
-          player={playerRef.current}
-          playerState={playerState}
-          sentenceIndex={Math.max(activeIdx, 0)}
-          sentenceCount={model.flat.length}
-        />
+        {/* 吸顶区:播放器 + 阅读模式切换(随时可切,无需滚回顶部) */}
+        <div className="shrink-0 z-20 bg-white/95 dark:bg-ink-900/95 backdrop-blur">
+          <AudioPlayer
+            player={playerRef.current}
+            playerState={playerState}
+            sentenceIndex={Math.max(activeIdx, 0)}
+            sentenceCount={model.flat.length}
+          />
+          {(isForeign || magazine?.hasPdf) && (
+            <div className="border-b border-ink-100 dark:border-ink-800">
+              <div
+                className={classNames(
+                  'mx-auto px-4 py-1.5 flex flex-wrap items-center gap-2 text-xs',
+                  bilingual ? 'max-w-5xl' : 'max-w-article'
+                )}
+              >
+                {isForeign && (
+                  <div className="flex rounded-full border border-ink-200 dark:border-ink-700 overflow-hidden">
+                    {[
+                      ['original', '原文'],
+                      ['zh', '中文'],
+                      ['both', '对照'],
+                    ].map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        onClick={() => setViewMode(mode)}
+                        className={classNames(
+                          'px-3 py-0.5 transition-colors',
+                          viewMode === mode
+                            ? 'bg-ink-800 text-white dark:bg-ink-100 dark:text-ink-900'
+                            : 'text-ink-700/60 dark:text-ink-100/60 hover:bg-ink-100 dark:hover:bg-ink-800'
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {bilingual && (
+                  <label className="flex items-center gap-1.5 text-ink-700/60 dark:text-ink-100/60 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={blurTrans}
+                      onChange={(e) => setBlurTrans(e.target.checked)}
+                    />
+                    中文悬停显示
+                  </label>
+                )}
+                {transState?.total != null && (
+                  <span className="text-ink-700/50 dark:text-ink-100/50 animate-pulse">
+                    翻译中 {transState.done}/{transState.total} 段…
+                  </span>
+                )}
+                {transState?.error && (
+                  <span className="text-red-500">
+                    翻译失败:{transState.error.slice(0, 60)}{' '}
+                    <button onClick={startTranslation} className="underline">
+                      重试
+                    </button>
+                  </span>
+                )}
+                {magazine?.hasPdf && (
+                  <button
+                    onClick={() => setPdfOpen((v) => !v)}
+                    className={classNames(
+                      'ml-auto px-2.5 py-0.5 rounded-full border transition-colors hidden md:inline-block',
+                      pdfOpen
+                        ? 'bg-ink-800 text-white border-ink-800 dark:bg-ink-100 dark:text-ink-900 dark:border-ink-100'
+                        : 'border-ink-200 dark:border-ink-700 text-ink-700/60 dark:text-ink-100/60 hover:border-ink-400'
+                    )}
+                  >
+                    📄 原版 PDF
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
         <div className="flex-1 overflow-y-auto" onMouseUp={handleMouseUp}>
           <article
             className={classNames(
@@ -448,67 +520,6 @@ export default function ReaderPage() {
               </button>
             </div>
 
-            {/* 视图工具行:阅读模式(原文/中文/对照)+ 原版 PDF */}
-            <div className="flex flex-wrap items-center gap-2 mb-6 text-xs">
-              {isForeign && (
-                <div className="flex rounded-full border border-ink-200 dark:border-ink-700 overflow-hidden">
-                  {[
-                    ['original', '原文'],
-                    ['zh', '中文'],
-                    ['both', '对照'],
-                  ].map(([mode, label]) => (
-                    <button
-                      key={mode}
-                      onClick={() => setViewMode(mode)}
-                      className={classNames(
-                        'px-3 py-1 transition-colors',
-                        viewMode === mode
-                          ? 'bg-ink-800 text-white dark:bg-ink-100 dark:text-ink-900'
-                          : 'text-ink-700/60 dark:text-ink-100/60 hover:bg-ink-100 dark:hover:bg-ink-800'
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {bilingual && (
-                <label className="flex items-center gap-1.5 text-ink-700/60 dark:text-ink-100/60 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={blurTrans}
-                    onChange={(e) => setBlurTrans(e.target.checked)}
-                  />
-                  中文悬停显示(先读原文)
-                </label>
-              )}
-              {transState?.total != null && (
-                <span className="text-ink-700/50 dark:text-ink-100/50 animate-pulse">
-                  翻译中 {transState.done}/{transState.total} 段…
-                </span>
-              )}
-              {transState?.error && (
-                <span className="text-red-500">
-                  翻译失败:{transState.error}{' '}
-                  <button onClick={startTranslation} className="underline">
-                    重试
-                  </button>
-                </span>
-              )}
-              {magazine?.hasPdf && (
-                <button
-                  onClick={() => setPdfOpen((v) => !v)}
-                  className={classNames(
-                    'px-2.5 py-1 rounded-full border transition-colors hidden md:inline-block',
-                    pdfOpen
-                      ? 'bg-ink-800 text-white border-ink-800 dark:bg-ink-100 dark:text-ink-900 dark:border-ink-100'
-                      : 'border-ink-200 dark:border-ink-700 text-ink-700/60 dark:text-ink-100/60 hover:border-ink-400'
-                  )}
-                >
-                  📄 原版 PDF
-                </button>
-              )}
-            </div>
 
             {zhPending && (
               /* 中文模式但译文尚未生成完:逐段显示已完成的译文 */
